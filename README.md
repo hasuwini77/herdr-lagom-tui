@@ -1,0 +1,100 @@
+# Lagom TUI
+
+One look for the Herdr TUI, the terminal it runs in and the Claude Code status line. Six themes, four wallpapers, and a
+dimming that is measured from the picture so text stays at WCAG 2.2 AA (4.5:1).
+
+![The Herdr TUI in the graphite theme](docs/preview.png)
+
+Stock Herdr 0.9.5 with the graphite theme. The workspaces are invented and the panes are stand-ins
+(`docs/demo-setup.sh`). The picture shows the Herdr side only: a wallpaper is drawn by WezTerm or Windows Terminal.
+
+## Install
+
+```sh
+herdr plugin install hasuwini77/herdr-lagom-tui
+herdr plugin action invoke hasuwini77.lagom.setup     # hooks in, links ~/.local/bin/lagom, backs up every file it edits
+```
+
+Or without the plugin system: `git clone https://github.com/hasuwini77/herdr-lagom-tui && herdr-lagom-tui/bin/lagom install`.
+
+Needs Python 3 and Herdr 0.9.5 or later. Tested on Linux under WSL2; macOS is untested. To undo everything:
+`lagom uninstall`.
+
+It drives five things from one command:
+
+| What | How |
+| --- | --- |
+| Herdr TUI | a managed `[theme]` block in `~/.config/herdr/config.toml`, then `herdr server reload-config` |
+| WezTerm | `lagom.lua` reads `lagom-state.json`; WezTerm reloads when that file changes |
+| Windows Terminal | a `Lagom` colour scheme, tab strip theme and background image in `settings.json` |
+| ccstatusline | the colours of `~/.config/ccstatusline/settings.json`; your layout is kept as the template |
+| Claude Code | `lagom hook` (pane titles) on four hook events in `~/.claude/settings.json`; your other hooks stay |
+
+## Use
+
+```sh
+lagom theme                  # list: graphite, moss, neon, palenight, paper, contrast
+lagom theme palenight        # or: lagom theme next
+lagom wallpaper nebula       # aurora, dawn, nebula, starfield · none · keep (your terminal's own picture)
+lagom menu                   # all of the above from a list
+lagom custom '#ff9e64'       # your own accent on the current theme; refused below 4.5:1
+lagom panes glass            # picture through the panes, AA-safe · solid: sidebar only · 0.5: lighter still
+lagom statusline one-line    # one row: model, context, week, reset, branch · mine: your own layout back
+lagom uninstall              # removes every hook, restores Windows Terminal's old values
+```
+
+Inside Herdr, after install:
+
+- the tab bar's right end shows the pilot: the working agent that changed last, and how many wait for you
+- `prefix+shift+b` focuses the agent that has waited longest
+- `prefix+comma` opens the Lagom menu in a popup
+- `prefix+shift+e` shows or hides the file tree on the right edge of the tab
+- a Claude Code pane's border reads `folder · topic` instead of `claude`
+
+## The file tree
+
+The file tree works like an editor's sidebar: folders open in place, with a coloured icon per file type.
+
+| Key or click | Does |
+| --- | --- |
+| click, `enter` | open or close a folder; on a file, send `@path` to the pane you came from |
+| `↑ ↓`, wheel | move |
+| `→` `←` | open a folder · close it, or jump to its parent |
+| `p` | view the file |
+| `.` | show hidden files |
+| `-` | go up one folder |
+| `i` | plain icons, for a font without Nerd Font glyphs |
+| `q` | close the panel |
+
+## How the dimming works
+
+`lib/measure.py` reads the brightest 1% of the picture (darkest 1% for a light theme). `lagom`
+then raises the share of the theme's background colour laid over the picture, one percent at a
+time, until the weakest of the 22 text colours reaches 4.5:1 against that worst spot. WezTerm
+gets it as a colour layer, Windows Terminal as `backgroundImageOpacity`.
+
+## Files
+
+- `bin/lagom` — the command (Python 3, standard library only)
+- `themes/lagom-*.json` — the palettes, shared with the Herdr App layout of the same name
+- `wallpapers/*.png` — generated pictures (1920×1080; starfield is 2880×1620)
+- `wezterm/lagom.lua` — the WezTerm side
+- `statusline/one-line.json` — the one-row ccstatusline layout
+- `lib/measure.py` — picture measuring (Pillow, ImageMagick or a plain PNG reader)
+- `herdr-plugin.toml` — the plugin: a set-up action, next theme, next wallpaper, next blocked agent, the menu as a popup
+- `patches/` — two optional Herdr source patches (section headings, coloured tab-bar status); not needed for the themes
+- `docs/demo-*.sh` — builds the invented session the picture above was taken from
+
+## Limits
+
+- Windows Terminal is themed only under WSL. WezTerm is themed on WSL, macOS and Linux; macOS is untested.
+- The WezTerm hook needs `return config` at the end of `.wezterm.lua` (or `.config/wezterm/wezterm.lua`).
+- File icons need a Nerd Font in Windows Terminal (restart it after installing one); WezTerm ships the symbols itself.
+- Icons are font glyphs, one colour each: a terminal cannot draw VS Code's picture icons.
+- ccstatusline colours are mapped from the colours found at install; other colours stay as they are.
+- `lagom panes` with a number under the glass value trades accent-pill contrast for a lighter pane (0.5 on graphite + starfield: 3.2:1, body text 6.7:1).
+- Three wallpapers are 1920 px wide and look soft on a wider window (starfield is 2880).
+- The status line needs `ccstatusline` installed and set as Claude Code's `statusLine` command.
+- The tab-bar line is plain text: Herdr strips colour from command output.
+- In WezTerm the picture shows inside Herdr's panes: filled cells are drawn 50–100% opaque, the lowest value that keeps pill text at 4.5:1 (set `cell_opacity` in `~/.config/lagom/state.json` to override).
+- The tab bar's status line is plain text: the pilot plus counts (needs you · working · done · idle). Herdr 0.9.5 has no clickable tab-bar buttons.

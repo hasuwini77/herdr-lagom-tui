@@ -1,0 +1,803 @@
+#!/usr/bin/env python3
+"""lagom: one look for the Herdr TUI and the terminal it runs in (WezTerm, Windows Terminal).
+
+  lagom theme [name|next]          pick a theme (no name: list them)
+  lagom wallpaper [name|next|none|keep]
+                                   a Lagom picture, no picture, or keep your terminal's own
+  lagom menu                       pick all of it from a list (prefix+comma inside Herdr)
+  lagom custom <accent> [background]
+                                   your own theme: the current one with your colours, AA-checked
+  lagom status                     one line for Herdr's tab bar: the pilot agent, who waits
+  lagom blocked                    focus the agent that has waited longest for you
+  lagom files                      show or hide the file tree on the right of this tab
+  lagom tree                       the file tree itself, in this terminal
+  lagom panes [solid|glass|0.3-1]  the picture behind the sidebar only, showing through the panes, or your own
+                                   pane opacity (lower is lighter; under glass, accent pills drop below 4.5:1)
+  lagom statusline [one-line|mine] Lagom's one-row ccstatusline layout, or the layout you had
+  lagom hook                       for Claude Code hooks: folder and topic onto the pane border
+  lagom install | uninstall        hook into Herdr, WezTerm, Windows Terminal, ccstatusline and Claude Code (with backups)
+
+Python 3 standard library only. Every file it edits is backed up next to it once (*.lagom-bak).
+"""
+import json, os, re, shutil, subprocess, sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+STATE = Path.home() / ".config/lagom/state.json"
+HERDR = Path.home() / ".config/herdr/config.toml"
+BEGIN, END = "# >>> lagom (managed by the `lagom` command; your own lines stay outside)", "# <<< lagom"
+TAG = "# lagom"
+TARGET = 4.5  # WCAG 2.2 AA for text
+LAST = {}  # what the last apply() did, for the menu; never saved
+
+# ---- colour maths (WCAG 2.2) -----------------------------------------------------
+
+def rgb(h):
+    h = h.lstrip("#")
+    return [int(h[i:i + 2], 16) for i in (0, 2, 4)]
+
+def lum(c):
+    r, g, b = (v / 12.92 if v <= .03928 else ((v + .055) / 1.055) ** 2.4 for v in (x / 255 for x in c))
+    return .2126 * r + .7152 * g + .0722 * b
+
+def ratio(a, b):
+    x, y = lum(a), lum(b)
+    return (max(x, y) + .05) / (min(x, y) + .05)
+
+def text_colours(t):
+    c = t["colors"]
+    return [c[k] for k in ("foreground", "muted", "dim", "accent", "working", "blocked", "done")] + t["ansi"][1:]
+
+def weakest(t, worst, a):
+    """The weakest text contrast when `a` of the background colour covers the picture's worst spot."""
+    under = [v * a + w * (1 - a) for v, w in zip(rgb(t["background"]), worst)]
+    return min(ratio(rgb(c), under) for c in text_colours(t))
+
+def dimming(t, measure):
+    """The least dimming (0..1) that keeps every text colour at TARGET over the picture."""
+    worst = measure["p99"] if lum(rgb(t["background"])) < .2 else measure["p01"]
+    a = 0.0
+    while a < 1 and weakest(t, worst, a) < TARGET:
+        a = round(a + .01, 2)
+    return a, weakest(t, worst, a)
+
+def cell_opacity(t, measure, a):
+    """How see-through Herdr's filled cells can be (0.5..1) while pill text keeps TARGET."""
+    c, base = t["colors"], rgb(t["background"])
+    spots = [[v * a + w * (1 - a) for v, w in zip(base, measure[k])] for k in ("p01", "p99")]
+    o = .5
+    while o < 1 and min(ratio(rgb(c[k + "_foreground"]), [o * x + (1 - o) * u for x, u in zip(rgb(c[k]), spot)])
+                        for k in ("accent", "solid") for spot in spots) < TARGET:
+        o = round(o + .05, 2)
+    return o
+
+# ---- state and places ------------------------------------------------------------
+
+def load():
+    try:
+        return json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+def save(s):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    STATE.write_text(json.dumps(s, indent=2) + "\n")
+
+USER_THEMES = STATE.parent / "themes"
+
+def themes():
+    files = sorted((ROOT / "themes").glob("lagom-*.json")) + sorted(USER_THEMES.glob("lagom-*.json"))
+    return {p.stem: json.loads(p.read_text()) for p in files}
+
+def order():
+    # Yours first after the shipped ones; high contrast last: an option, not a first suggestion.
+    return sorted(themes(), key=lambda n: (n == "lagom-contrast", n == "lagom-custom", n))
+
+def pictures():
+    return sorted(p.stem for p in (ROOT / "wallpapers").glob("*.png"))
+
+def backup(path):
+    bak = Path(str(path) + ".lagom-bak")
+    if path.exists() and not bak.exists():
+        shutil.copy2(path, bak)
+
+def win_home(s):
+    """The Windows home as a WSL path, or None outside WSL. Looked up once, then remembered."""
+    if "win_home" not in s:
+        try:
+            out = subprocess.run(["cmd.exe", "/c", "echo %USERPROFILE%"], capture_output=True, text=True, timeout=15, cwd="/mnt/c").stdout.strip()
+            s["win_home"] = subprocess.run(["wslpath", out], capture_output=True, text=True, timeout=15).stdout.strip() or None
+        except (OSError, subprocess.SubprocessError):
+            s["win_home"] = None
+    return Path(s["win_home"]) if s["win_home"] else None
+
+def term_home(s):
+    """Where the terminal's own config lives: the Windows home under WSL, else this home (macOS, Linux)."""
+    return win_home(s) or Path.home()
+
+def term_path(s, p):
+    """A path as the terminal program sees it."""
+    if not win_home(s):
+        return str(p)
+    return subprocess.run(["wslpath", "-m", str(p)], capture_output=True, text=True).stdout.strip()
+
+def mix(a, b, k):
+    """Colour a moved k of the way to colour b."""
+    return "#" + "".join(f"{round(x + (y - x) * k):02x}" for x, y in zip(rgb(a), rgb(b)))
+
+def wt_settings(home):
+    for p in sorted(home.glob("AppData/Local/Packages/Microsoft.WindowsTerminal*/LocalState/settings.json")):
+        return p
+    return None
+
+# ---- Herdr -----------------------------------------------------------------------
+
+def herdr_block(t, see_through):
+    c, a = t["colors"], t["ansi"]
+    light = lum(rgb(t["background"])) > .5
+    custom = {
+        "accent": c["accent"], "panel_bg": "reset", "active_row_bg": c["selected"], "selection_bg": c["hover"],
+        "surface0": c["surface"], "surface1": c["raised"], "surface_dim": c["chrome"],
+        "overlay0": c["dim"], "overlay1": c["muted"], "text": c["foreground"], "subtext0": c["muted"],
+        "mauve": a[5], "green": c["done"], "yellow": a[3], "red": c["blocked"], "blue": a[4], "teal": a[6], "peach": c["working"],
+    }
+    if not see_through:
+        custom["sidebar_bg"] = c["chrome"]  # with a picture the sidebar stays see-through
+    lines = [BEGIN, "[theme]", f'name = "{"catppuccin-latte" if light else "catppuccin"}"', "", "[theme.custom]"]
+    lines += [f'{k} = "{v}"' for k, v in custom.items()] + [END]
+    return "\n".join(lines) + "\n"
+
+def strip_block(text):
+    return re.sub(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", "", text, flags=re.S)
+
+def herdr_write(text):
+    """Writes config.toml only if Herdr accepts it; otherwise puts the old one back."""
+    old = HERDR.read_text()
+    if text == old:
+        return
+    HERDR.write_text(text)
+    check = subprocess.run(["herdr", "config", "check"], capture_output=True, text=True)
+    if check.returncode != 0:
+        HERDR.write_text(old)
+        sys.exit("lagom: Herdr refused the config, nothing changed:\n" + (check.stdout + check.stderr).strip())
+    subprocess.run(["herdr", "server", "reload-config"], capture_output=True)
+
+def herdr_apply(t, see_through):
+    if HERDR.exists():
+        herdr_write(strip_block(HERDR.read_text()).rstrip("\n") + "\n\n" + herdr_block(t, see_through))
+
+def herdr_hooks(on):
+    """The tab-bar status line and the next-blocked key; each line carries TAG so it can be removed."""
+    text = "\n".join(l for l in HERDR.read_text().split("\n") if not l.rstrip().endswith(TAG))
+    if on:
+        exe = str(Path.home() / ".local/bin/lagom")
+        bar = f'tab_bar_right = [{{ type = "command", command = "{exe} status", interval_seconds = 3, timeout_seconds = 2 }}] {TAG}'
+        if re.search(r"^tab_bar_right\s*=", text, flags=re.M):
+            print("lagom: you already have a tab_bar_right; add this entry yourself:\n  " + bar)
+        elif re.search(r"^\[ui\]$", text, flags=re.M):
+            text = re.sub(r"^\[ui\]$", "[ui]\n" + bar, text, count=1, flags=re.M)
+            if not re.search(r"^show_agent_labels_on_pane_borders\s*=", text, flags=re.M):  # pane title bars, like the App
+                text = re.sub(r"^\[ui\]$", f"[ui]\nshow_agent_labels_on_pane_borders = true {TAG}", text, count=1, flags=re.M)
+        else:
+            text = "[ui]\n" + bar + "\n\n" + text
+        keys = [("prefix+shift+b", "shell", f"{exe} blocked", "lagom: next agent that needs you", None),
+                ("prefix+comma", "popup", f"{exe} menu", "lagom: look settings", ("46", "24"))]
+        keys.append(("prefix+shift+e", "shell", f"{exe} files", "lagom: file panel on the right", None))
+        blocks = []
+        for key, kind, command, about, size in keys:
+            lines = ["[[keys.command]]", f'key = "{key}"', f'type = "{kind}"', f'command = "{command}"', f'description = "{about}"']
+            lines += [f"width = {size[0]}", f"height = {size[1]}"] if size else []
+            blocks.append("\n".join(f"{l} {TAG}" for l in lines))
+        text = strip_block(text).rstrip("\n") + "\n\n" + "\n\n".join(blocks) + "\n"
+    herdr_write(text)
+
+# ---- WezTerm ---------------------------------------------------------------------
+
+HOOK = """-- >>> lagom: theme and wallpaper picked with the `lagom` command. Delete this block to opt out.
+do
+  local ok, lagom = pcall(dofile, wezterm.home_dir .. '/.config/wezterm/lagom.lua')
+  if ok and lagom and lagom.apply(config, wezterm) then LOOK = 'lagom' end -- LOOK: this config's own wallpaper switch
+end
+-- <<< lagom
+"""
+
+def wez_state(t, bg):
+    c, a = t["colors"], t["ansi"]
+    return {
+        "scheme": {
+            "background": t["background"], "foreground": t["foreground"],
+            "cursor_bg": t["cursor"], "cursor_border": t["cursor"], "cursor_fg": t["background"],
+            "selection_bg": t["selection"], "selection_fg": t["foreground"],
+            "scrollbar_thumb": c["border"], "split": c["border"], "ansi": a[:8], "brights": a[8:],
+        },
+        "tab_bar": {
+            "background": c["chrome"],
+            "active_tab": {"bg_color": c["selected"], "fg_color": c["foreground"], "intensity": "Bold"},
+            "inactive_tab": {"bg_color": c["chrome"], "fg_color": c["muted"]},
+            "inactive_tab_hover": {"bg_color": c["hover"], "fg_color": c["foreground"]},
+            "new_tab": {"bg_color": c["chrome"], "fg_color": c["muted"]},
+            "new_tab_hover": {"bg_color": c["hover"], "fg_color": c["foreground"]},
+        },
+        "frame": {"active_titlebar_bg": c["chrome"], "inactive_titlebar_bg": c["chrome"]},
+        "background": bg,  # "keep", None, or {image, dim, color}
+    }
+
+def wez_install(home, on):
+    cfg = next((p for p in (home / ".wezterm.lua", home / ".config/wezterm/wezterm.lua") if p.exists()), None)
+    if not cfg:
+        return
+    with open(cfg, encoding="utf-8", newline="") as f:  # newline="": keep the file's own line endings
+        text = re.sub(r"-- >>> lagom.*?-- <<< lagom\r?\n", "", f.read(), flags=re.S)
+    if on:
+        backup(cfg)
+        head, sep, tail = text.rpartition("return config")
+        if not sep:
+            print(f"lagom: {cfg} has no `return config`; add the hook by hand (see README).")
+            return
+        hook = HOOK if "local LOOK" in text else re.sub(r" then LOOK = 'lagom' end.*", " then end", HOOK)
+        text = head + (hook.replace("\n", "\r\n") if "\r\n" in text else hook) + sep + tail
+        (home / ".config/wezterm").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "wezterm/lagom.lua", home / ".config/wezterm/lagom.lua")
+    with open(cfg, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+# ---- Windows Terminal ------------------------------------------------------------
+
+WT_NAMES = ["black", "red", "green", "yellow", "blue", "purple", "cyan", "white"]
+WT_KEYS = ("colorScheme", "backgroundImage", "backgroundImageOpacity")
+
+def wt_apply(path, s, t, bg):
+    doc = json.loads(path.read_text(encoding="utf-8-sig"))
+    d = doc.setdefault("profiles", {}).setdefault("defaults", {})
+    if "wt_before" not in s:
+        backup(path)
+        s["wt_before"] = {k: d.get(k) for k in WT_KEYS}
+    s["wt_before"].setdefault("theme", doc.get("theme") if doc.get("theme") != "Lagom" else None)
+    scheme = {"name": "Lagom", "background": t["background"], "foreground": t["foreground"],
+              "cursorColor": t["cursor"], "selectionBackground": t["selection"]}
+    scheme.update({n: t["ansi"][i] for i, n in enumerate(WT_NAMES)})
+    scheme.update({"bright" + n.capitalize(): t["ansi"][i + 8] for i, n in enumerate(WT_NAMES)})
+    doc["schemes"] = [x for x in doc.get("schemes", []) if x.get("name") != "Lagom"] + [scheme]
+    d["colorScheme"] = "Lagom"
+    c = t["colors"]
+    strip = {"name": "Lagom", "tab": {"background": c["selected"] + "FF", "unfocusedBackground": c["chrome"] + "FF", "showCloseButton": "always"},
+             "tabRow": {"background": c["chrome"] + "FF", "unfocusedBackground": c["chrome"] + "FF"},
+             "window": {"applicationTheme": "light" if lum(rgb(t["background"])) > .5 else "dark"}}
+    doc["themes"] = [x for x in doc.get("themes", []) if x.get("name") != "Lagom"] + [strip]
+    doc["theme"] = "Lagom"
+    if bg == "keep":
+        want = {k: s["wt_before"].get(k) for k in WT_KEYS[1:]}  # theme is not a profile key
+    elif bg:
+        want = {"backgroundImage": bg["image"].replace("/", "\\"), "backgroundImageOpacity": round(1 - bg["dim"], 2)}
+    else:
+        want = {"backgroundImage": None, "backgroundImageOpacity": None}
+    for k, v in want.items():
+        d.pop(k, None) if v is None else d.__setitem__(k, v)
+    path.write_text(json.dumps(doc, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+
+def wt_restore(path, s):
+    if "wt_before" not in s:
+        return
+    doc = json.loads(path.read_text(encoding="utf-8-sig"))
+    d = doc["profiles"]["defaults"]
+    before = s.pop("wt_before")
+    old_theme = before.pop("theme", None)
+    for k, v in before.items():
+        d.pop(k, None) if v is None else d.__setitem__(k, v)
+    doc.pop("theme", None) if old_theme is None else doc.__setitem__("theme", old_theme)
+    doc["schemes"] = [x for x in doc.get("schemes", []) if x.get("name") != "Lagom"]
+    doc["themes"] = [x for x in doc.get("themes", []) if x.get("name") != "Lagom"]
+    path.write_text(json.dumps(doc, indent=4, ensure_ascii=False) + "\n", encoding="utf-8")
+
+# ---- ccstatusline ----------------------------------------------------------------
+
+CCSL = Path.home() / ".config/ccstatusline/settings.json"
+CCSL_TEMPLATE = STATE.parent / "ccstatusline.template.json"
+
+def ccsl_roles(t):
+    """Each colour of the statusline as it was at install, and the theme colour that takes its place."""
+    c, a, bg = t["colors"], t["ansi"], t["background"]
+    cap = mix(c["accent"], bg, .3)
+    return {
+        "7C5CFF": c["accent"], "5B3FD1": cap, "0B0E14": c["accent_foreground"],
+        "FFFFFF": max((c["foreground"], c["accent_foreground"]), key=lambda x: ratio(rgb(x), rgb(cap))),
+        "2E9E7A": c["done"], "1E6B52": mix(c["done"], bg, .3), "7CE38B": c["done"], "3E8E5A": mix(c["done"], bg, .25),
+        "79808E": c["input"], "F0C755": a[3], "6B5A28": mix(a[3], bg, .55), "5B9BE8": a[4],
+        "B69CFF": a[5], "463A6B": mix(a[5], bg, .6), "8B79C9": mix(a[5], bg, .2),
+        "FF6B6B": c["blocked"], "9C4A4A": mix(c["blocked"], bg, .4),
+    }
+
+def ccsl_apply(t):
+    if not CCSL_TEMPLATE.exists():
+        return
+    roles = ccsl_roles(t)
+    text = re.sub(r"hex:([0-9A-Fa-f]{6})", lambda m: "hex:" + roles.get(m.group(1).upper(), "#" + m.group(1)).lstrip("#").upper(), CCSL_TEMPLATE.read_text())
+    json.loads(text)  # never write a file ccstatusline cannot read
+    CCSL.write_text(text)
+
+# ---- apply -----------------------------------------------------------------------
+
+def measure(s, name):
+    cache = s.setdefault("measures", {})
+    if name not in cache:
+        out = subprocess.run([sys.executable, str(ROOT / "lib/measure.py"), str(ROOT / "wallpapers" / f"{name}.png")], capture_output=True, text=True)
+        cache[name] = json.loads(out.stdout or "{}")
+    return cache[name] if "p99" in cache[name] else None
+
+def apply(s):
+    name = s.get("theme") or "lagom-neon"
+    t = themes()[name]
+    wall = s.get("wallpaper", "keep")
+    home, wt_home, bg, note = term_home(s), win_home(s), None, ""
+    if wall == "keep":
+        bg, note = "keep", "your terminal's own background"
+    elif wall:
+        m = measure(s, wall)
+        a, got = dimming(t, m) if m else (.75, None)
+        if home:
+            dest = home / ".config/wezterm/backgrounds/lagom" / f"{wall}.png"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists():
+                shutil.copy2(ROOT / "wallpapers" / f"{wall}.png", dest)
+            bg = {"image": term_path(s, dest), "dim": a, "color": t["background"], "cell_opacity": s.get("cell_opacity") or (cell_opacity(t, m, a) if m else 1.0)}
+        note = f"{wall}, dimmed {round(a * 100)}%" + (f", weakest text {got:.2f}:1" if got else " (unmeasured)")
+    else:
+        note = "no picture"
+    herdr_apply(t, see_through=bool(wall))
+    if home:
+        if (home / ".config/wezterm/lagom.lua").exists():
+            (home / ".config/wezterm/lagom-state.json").write_text(json.dumps(wez_state(t, bg), indent=2) + "\n")
+    wt = wt_settings(wt_home) if wt_home else None
+    if wt and s.get("installed"):
+        wt_apply(wt, s, t, bg)
+    ccsl_apply(t)
+    save(s)
+    LAST["note"] = f"{name.replace('lagom-', '')} · {note}"
+    if not LAST.get("quiet"):
+        print("lagom: " + LAST["note"])
+
+# ---- agents ----------------------------------------------------------------------
+
+MARK = {"working": "◐", "blocked": "×", "done": "✓", "idle": "○"}
+WORD = {"working": "working", "blocked": "needs you", "done": "done", "idle": "idle"}
+
+def agents():
+    try:
+        out = subprocess.run(["herdr", "agent", "list"], capture_output=True, text=True, timeout=2).stdout
+        return json.loads(out)["result"]["agents"]
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        return []
+
+def status():
+    """The pilot: the working agent that changed last, else whoever changed last."""
+    recent = sorted(agents(), key=lambda a: -a.get("state_change_seq", 0))
+    if not recent:
+        return print("no agents")
+    a = next((x for x in recent if x["agent_status"] == "working"), recent[0])
+    title = (a.get("name") or a.get("terminal_title_stripped") or a.get("agent") or "agent")[:32]
+    st = a["agent_status"]
+    count = {k: sum(1 for x in recent if x["agent_status"] == k) for k in ("blocked", "working", "done", "idle")}
+    strip = "  ".join(f"{MARK[k]} {n} {WORD[k]}" for k, n in count.items() if n)
+    print(f"{MARK.get(st, '·')} {title} · {WORD.get(st, st)}" + (f"  │  {strip}" if len(recent) > 1 else ""))
+
+def blocked():
+    waiting = sorted((a for a in agents() if a["agent_status"] == "blocked"), key=lambda a: a.get("state_change_seq", 0))
+    if waiting:
+        subprocess.run(["herdr", "agent", "focus", waiting[0]["pane_id"]], capture_output=True)
+
+# ---- your own theme --------------------------------------------------------------
+
+# ---- Claude Code -----------------------------------------------------------------
+
+CLAUDE = Path.home() / ".claude/settings.json"
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd")
+TITLE_COLS = 44
+
+def clip(text, cols):
+    return text if len(text) <= cols else text[:cols - 1].rstrip() + "…"
+
+def hook():
+    """Run by Claude Code with the hook's JSON on stdin. Silent, and never an error: a hook must not stop a turn."""
+    pane = os.environ.get("HERDR_PANE_ID")
+    try:
+        event = json.load(sys.stdin)
+        if not pane or event.get("agent_id"):  # not in Herdr, or a subagent
+            return
+        if event.get("hook_event_name") == "SessionEnd":
+            args = ["--clear-display-agent"]
+        else:
+            topic = herdr_json("pane", "get", pane).get("pane", {}).get("terminal_title_stripped") or ""
+            label = Path(event.get("cwd") or os.getcwd()).name
+            if topic and topic != "Claude Code":
+                label += " · " + topic
+            args = ["--display-agent", clip(label, TITLE_COLS)]
+        subprocess.run(["herdr", "pane", "report-metadata", pane, "--source", "lagom", *args], capture_output=True, timeout=3)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+def claude_hooks(on):
+    """Adds or removes `lagom hook` in Claude Code's settings; every other hook stays as it is."""
+    if not CLAUDE.exists():
+        return
+    old = CLAUDE.read_text()
+    doc = json.loads(old)
+    cmd = str(Path.home() / ".local/bin/lagom") + " hook"
+    hooks = doc.get("hooks", {})
+    for ev in list(hooks):
+        hooks[ev] = [g for g in hooks[ev] if not any(h.get("command") == cmd for h in g.get("hooks", []))]
+        if not hooks[ev]:
+            del hooks[ev]
+    if on:
+        for ev in HOOK_EVENTS:
+            hooks.setdefault(ev, []).append({"hooks": [{"type": "command", "command": cmd, "timeout": 5}]})
+    doc["hooks"] = hooks
+    if not hooks:
+        del doc["hooks"]
+    text = json.dumps(doc, indent=2, ensure_ascii=False) + "\n"
+    if text != old:
+        backup(CLAUDE)
+        CLAUDE.write_text(text)
+
+# ---- statusline layout -----------------------------------------------------------
+
+CCSL_MINE = STATE.parent / "ccstatusline.mine.json"
+
+def statusline(s, arg):
+    now = s.get("statusline", "mine")
+    if not arg:
+        return print("\n".join(("* " if o == now else "  ") + o for o in ("one-line", "mine")))
+    if arg not in ("one-line", "mine"):
+        sys.exit(f"lagom: no statusline '{arg}'. Have: one-line, mine")
+    if arg == "one-line" and now != "one-line":
+        if CCSL_TEMPLATE.exists():
+            shutil.copy2(CCSL_TEMPLATE, CCSL_MINE)
+        CCSL.parent.mkdir(parents=True, exist_ok=True)
+        CCSL_TEMPLATE.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "statusline/one-line.json", CCSL_TEMPLATE)
+    elif arg == "mine" and now == "one-line":
+        if not CCSL_MINE.exists():
+            sys.exit("lagom: no saved layout of yours to go back to.")
+        shutil.move(CCSL_MINE, CCSL_TEMPLATE)
+    s["statusline"] = arg
+    apply(s)
+
+HEX = re.compile(r"^#?[0-9a-fA-F]{6}$")
+
+def custom(s, accent, background=None):
+    """The current theme with your accent (and background). Refused when text would drop below AA."""
+    if not HEX.match(accent) or (background and not HEX.match(background)):
+        return "Colours are six hex digits, like #7cc4ff."
+    base = json.loads(json.dumps(themes()[s.get("theme") or "lagom-neon"]))
+    c = base["colors"]
+    accent = "#" + accent.lstrip("#").lower()
+    c["accent"] = c["solid"] = base["cursor"] = accent
+    c["accent_foreground"] = c["solid_foreground"] = max(("#000000", "#ffffff"), key=lambda x: ratio(rgb(x), rgb(accent)))
+    if background:
+        background = "#" + background.lstrip("#").lower()
+        light = lum(rgb(background)) > .5
+        toward = "#000000" if light else "#ffffff"
+        base["background"] = c["background"] = c["canvas"] = background
+        for key, k in (("chrome", .03), ("surface", .06), ("popover", .06), ("raised", .11), ("hover", .14), ("selected", .17), ("border", .25)):
+            c[key] = mix(background, toward, k)
+    surfaces = [c[k] for k in ("background", "chrome", "surface", "raised", "hover", "selected")]
+    low = min(ratio(rgb(x), rgb(y)) for x in text_colours(base) for y in surfaces)
+    if low < TARGET:
+        return f"Refused: the weakest text would be {low:.2f}:1, AA needs 4.5:1. Try a lighter or darker colour."
+    USER_THEMES.mkdir(parents=True, exist_ok=True)
+    (USER_THEMES / "lagom-custom.json").write_text(json.dumps(base, indent=2) + "\n")
+    s["theme"] = "lagom-custom"
+    apply(s)
+    return None
+
+# ---- the menu --------------------------------------------------------------------
+
+def menu(s):
+    import curses
+    LAST["quiet"] = True  # the menu shows the result itself
+    def rows():
+        out = [("head", "Theme", None)]
+        out += [("theme", n.replace("lagom-", ""), n) for n in order()]
+        out += [("custom", "your own accent…", None), ("head", "Wallpaper", None)]
+        out += [("wall", o or "none", o) for o in ["keep", None] + pictures()]
+        return out
+    def run(scr):
+        curses.curs_set(0)
+        curses.use_default_colors()
+        at, msg = 1, "↑↓ move · enter apply · q close"
+        while True:
+            items = rows()
+            scr.erase()
+            scr.addstr(0, 2, "Lagom", curses.A_BOLD)
+            for i, (kind, label, value) in enumerate(items):
+                if kind == "head":
+                    scr.addstr(i + 2, 2, label, curses.A_DIM)
+                    continue
+                on = (kind == "theme" and value == (s.get("theme") or "lagom-neon")) or (kind == "wall" and value == s.get("wallpaper", "keep"))
+                scr.addstr(i + 2, 2, ("› " if i == at else "  ") + ("● " if on else "○ " if kind != "custom" else "+ ") + label,
+                           curses.A_REVERSE if i == at else curses.A_NORMAL)
+            h, w = scr.getmaxyx()
+            scr.addstr(min(len(items) + 3, h - 1), 2, msg[:max(0, w - 4)], curses.A_DIM)
+            key = scr.getch()
+            step = -1 if key in (curses.KEY_UP, ord("k")) else 1 if key in (curses.KEY_DOWN, ord("j")) else 0
+            if step:
+                at = (at + step) % len(items)
+                while items[at][0] == "head":
+                    at = (at + step) % len(items)
+            elif key in (ord("q"), 27):
+                return
+            elif key in (curses.KEY_ENTER, 10, 13):
+                kind, label, value = items[at]
+                if kind == "custom":
+                    curses.echo(); curses.curs_set(1)
+                    scr.addstr(min(len(items) + 3, h - 1), 2, "accent, e.g. #7cc4ff: ".ljust(w - 4)[:w - 4])
+                    typed = scr.getstr(min(len(items) + 3, h - 1), 24, 8).decode().strip()
+                    curses.noecho(); curses.curs_set(0)
+                    msg = (custom(s, typed) if typed else None) or LAST.get("note", "")
+                else:
+                    s["theme" if kind == "theme" else "wallpaper"] = value
+                    apply(s)
+                    msg = LAST.get("note", "")
+    curses.wrapper(run)
+
+# ---- the file panel --------------------------------------------------------------
+
+PANEL, PANEL_COLS = "files", 38
+
+def herdr_json(*args):
+    out = subprocess.run(["herdr", *args], capture_output=True, text=True, timeout=5).stdout
+    return json.loads(out).get("result", {})
+
+def files():
+    """Toggles the file tree, a pane labelled PANEL, at the right edge of the tab you are in."""
+    here = os.environ.get("HERDR_ACTIVE_PANE_ID") or os.environ.get("HERDR_PANE_ID") or herdr_json("pane", "current")["pane"]["pane_id"]
+    lay = herdr_json("pane", "layout", "--pane", here)["layout"]
+    for p in herdr_json("pane", "list").get("panes", []):
+        if p.get("tab_id") == lay["tab_id"] and p.get("label") == PANEL:
+            return subprocess.run(["herdr", "pane", "close", p["pane_id"]], capture_output=True)
+    edge = lay["area"]["x"] + lay["area"]["width"]
+    right = max((p for p in lay["panes"] if p["rect"]["x"] + p["rect"]["width"] == edge), key=lambda p: p["rect"]["height"])
+    ratio = max(.5, round(1 - PANEL_COLS / right["rect"]["width"], 3))
+    cwd = herdr_json("pane", "get", here)["pane"].get("foreground_cwd") or str(Path.home())
+    new = herdr_json("pane", "split", right["pane_id"], "--direction", "right", "--ratio", str(ratio), "--cwd", cwd, "--focus")["pane"]["pane_id"]
+    subprocess.run(["herdr", "pane", "rename", new, PANEL], capture_output=True)
+    exe = Path.home() / ".local/bin/lagom"
+    subprocess.run(["herdr", "pane", "run", new, f"LAGOM_ORIGIN={here} exec {exe} tree"], capture_output=True)  # q closes the panel
+
+# Nerd Font glyphs and an ANSI colour (1 red, 2 green, 3 yellow, 4 blue, 5 magenta, 6 cyan) per kind of file.
+ICONS = {
+    "dir": ("", 4), "open": ("", 4), "file": ("", 7),
+    "py": ("", 3), "js": ("", 3), "mjs": ("", 3), "cjs": ("", 3), "ts": ("", 4),
+    "tsx": ("", 6), "jsx": ("", 6), "json": ("", 3), "md": ("", 6), "mdx": ("", 6),
+    "html": ("", 1), "css": ("", 4), "scss": ("", 5), "sh": ("", 2), "zsh": ("", 2),
+    "rs": ("", 1), "go": ("", 6), "lua": ("", 4), "toml": ("", 7), "yaml": ("", 7),
+    "yml": ("", 7), "lock": ("", 7), "png": ("", 5), "jpg": ("", 5), "jpeg": ("", 5),
+    "svg": ("", 3), "webp": ("", 5), "gif": ("", 5), "pdf": ("", 1), "txt": ("", 7),
+    "sql": ("", 3), "env": ("", 3), "zip": ("", 3), "gz": ("", 3),
+}
+NAMES = {".gitignore": ("", 1), ".git": ("", 1), "Dockerfile": ("", 4), "package.json": ("", 2),
+         "README.md": ("", 3), "CLAUDE.md": ("", 5), "LICENSE": ("", 3), "node_modules": ("", 2)}
+PLAIN = {"dir": ("▸", 4), "open": ("▾", 4), "file": ("·", 7)}  # for a font without the glyphs
+
+def icon(name, is_dir, is_open, plain):
+    if plain:
+        return PLAIN["open" if is_open else "dir" if is_dir else "file"]
+    if name in NAMES:
+        return NAMES[name]
+    if is_dir:
+        return ICONS["open" if is_open else "dir"]
+    return ICONS.get(name.rsplit(".", 1)[-1].lower() if "." in name else "", ICONS["file"])
+
+def tree(s):
+    """A file tree like an editor's sidebar: folders open in place, click or Enter, coloured icons."""
+    import curses
+    root, origin = Path.cwd(), os.environ.get("LAGOM_ORIGIN")
+    opened, hidden, plain = {root}, False, s.get("icons") == "plain"
+
+    def listing():
+        out = []
+        def walk(folder, depth):
+            try:
+                kids = sorted(folder.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+            except OSError:
+                return
+            for p in kids:
+                if p.name == ".git" or (not hidden and p.name.startswith(".")):
+                    continue
+                out.append((p, depth, p.is_dir()))
+                if p in opened:
+                    walk(p, depth + 1)
+        walk(root, 0)
+        return out
+
+    def run(scr):
+        nonlocal root, hidden, plain
+        curses.curs_set(0)
+        curses.use_default_colors()
+        for n in range(1, 8):
+            curses.init_pair(n, n, -1)
+        curses.mousemask(curses.ALL_MOUSE_EVENTS)
+        at, top, msg = 0, 0, ""
+        while True:
+            rows = listing()
+            h, w = scr.getmaxyx()
+            body = max(1, h - 3)
+            at = max(0, min(at, len(rows) - 1))
+            top = max(0, min(top, at, max(0, len(rows) - body)))
+            if at >= top + body:
+                top = at - body + 1
+            scr.erase()
+            scr.addnstr(0, 1, (icon(root.name, True, True, plain)[0] + " " + (root.name or "/")).upper(), w - 2, curses.A_BOLD)
+            for y, (p, depth, is_dir) in enumerate(rows[top:top + body]):
+                i = top + y
+                glyph, colour = icon(p.name, is_dir, p in opened, plain)
+                arrow = ("▾" if p in opened else "▸") if is_dir and not plain else " "
+                pad = " " + "  " * depth + arrow + " "
+                style = curses.A_REVERSE if i == at else curses.A_NORMAL
+                scr.addnstr(y + 1, 0, " " * (w - 1), w - 1, style)
+                scr.addnstr(y + 1, 0, pad, w - 1, style)
+                if len(pad) < w - 3:
+                    scr.addnstr(y + 1, len(pad), glyph + " ", 2, style | curses.color_pair(colour))
+                    scr.addnstr(y + 1, len(pad) + 2, p.name, w - len(pad) - 3, style | (curses.A_BOLD if is_dir else 0))
+            scr.addnstr(h - 1, 1, (msg or "enter open · p view · . hidden · - up · q close"), w - 2, curses.A_DIM)
+            msg = ""
+            key = scr.getch()
+            click = None
+            if key == curses.KEY_MOUSE:
+                try:
+                    _, _, my, _, state = curses.getmouse()
+                except curses.error:
+                    continue
+                if state & getattr(curses, "BUTTON4_PRESSED", 0):
+                    top = max(0, top - 3); at = min(at, top + body - 1); continue
+                if state & getattr(curses, "BUTTON5_PRESSED", 0x200000):
+                    top = min(max(0, len(rows) - body), top + 3); at = max(at, top); continue
+                if 1 <= my <= body and top + my - 1 < len(rows):
+                    at, click = top + my - 1, True
+                else:
+                    continue
+            if not rows and key not in (ord("q"), ord("-"), ord(".")):
+                continue
+            p, depth, is_dir = rows[at] if rows else (root, 0, True)
+            if key in (curses.KEY_UP, ord("k")):
+                at -= 1
+            elif key in (curses.KEY_DOWN, ord("j")):
+                at += 1
+            elif key in (curses.KEY_NPAGE, curses.KEY_PPAGE):
+                at += body if key == curses.KEY_NPAGE else -body
+            elif key == ord("q"):
+                return
+            elif key == ord("."):
+                hidden = not hidden
+            elif key == ord("i"):
+                plain = not plain
+                s["icons"] = "plain" if plain else "nerd"
+                save(s)
+            elif key == ord("-"):
+                root = root.parent
+                opened.add(root)
+                at = 0
+            elif key in (curses.KEY_LEFT, ord("h")):
+                if is_dir and p in opened:
+                    opened.discard(p)
+                elif p.parent != root:
+                    at = next(i for i, r in enumerate(rows) if r[0] == p.parent)
+            elif click or key in (curses.KEY_RIGHT, ord("l"), curses.KEY_ENTER, 10, 13):
+                if is_dir:
+                    opened.discard(p) if p in opened and key != curses.KEY_RIGHT else opened.add(p)
+                elif key != curses.KEY_RIGHT:
+                    if origin:  # hand the file to the pane the panel was opened from, as an @mention
+                        subprocess.run(["herdr", "pane", "send-text", origin, "@" + os.path.relpath(p, Path.cwd()) + " "], capture_output=True)
+                        msg = "sent @" + p.name
+                    else:
+                        msg = str(p)
+            elif key == ord("p") and not is_dir:
+                curses.endwin()
+                subprocess.run([shutil.which("bat") or "less", str(p)] if shutil.which("bat") else ["less", "-R", str(p)])
+                scr.clear()
+    curses.wrapper(run)
+
+# ---- commands --------------------------------------------------------------------
+
+def pick(options, current, arg):
+    if arg == "next":
+        return options[(options.index(current) + 1) % len(options)] if current in options else options[0]
+    return arg
+
+def main(argv):
+    cmd, arg = (argv + [None, None])[:2]
+    s = load()
+    if cmd == "status":
+        return status()
+    if cmd == "blocked":
+        return blocked()
+    if cmd == "files":
+        return files()
+    if cmd == "tree":
+        return tree(s)
+    if cmd == "menu":
+        return menu(s)
+    if cmd == "hook":
+        return hook()
+    if cmd == "statusline":
+        return statusline(s, arg)
+    if cmd == "panes":
+        now = s.get("cell_opacity")
+        if not arg:
+            return print("\n".join(("* " if o == {None: "glass", 1.0: "solid"}.get(now, str(now)) else "  ") + o
+                                   for o in ["solid", "glass"] + ([str(now)] if now not in (None, 1.0) else [])))
+        try:
+            own = {"solid": 1.0, "glass": None}[arg] if arg in ("solid", "glass") else float(arg)
+        except ValueError:
+            own = 0
+        if own is not None and not .3 <= own <= 1:
+            sys.exit(f"lagom: no panes '{arg}'. Have: solid, glass, or a number from 0.3 to 1")
+        s.pop("cell_opacity", None)  # glass: as see-through as the pill text allows
+        if own:
+            s["cell_opacity"] = own
+        return apply(s)
+    if cmd == "custom":
+        if not arg:
+            sys.exit("lagom: give an accent, like: lagom custom '#7cc4ff' ['#0b0d10']")
+        problem = custom(s, arg, argv[2] if len(argv) > 2 else None)
+        return sys.exit("lagom: " + problem) if problem else None
+    if cmd == "theme":
+        names = order()
+        if not arg:
+            return print("\n".join(("* " if n == s.get("theme") else "  ") + n.replace("lagom-", "") for n in names))
+        name = pick(names, s.get("theme"), arg if arg == "next" or arg.startswith("lagom-") else "lagom-" + arg)
+        if name not in names:
+            sys.exit(f"lagom: no theme '{arg}'. Have: " + ", ".join(n.replace("lagom-", "") for n in names))
+        s["theme"] = name
+        return apply(s)
+    if cmd == "wallpaper":
+        options = ["keep", None] + pictures()
+        if not arg:
+            return print("\n".join(("* " if o == s.get("wallpaper", "keep") else "  ") + (o or "none") for o in options))
+        choice = pick(options, s.get("wallpaper", "keep"), None if arg == "none" else arg)
+        if choice not in options:
+            sys.exit(f"lagom: no wallpaper '{arg}'. Have: keep, none, " + ", ".join(pictures()))
+        s["wallpaper"] = choice
+        return apply(s)
+    if cmd == "relink":  # run by Herdr at startup: a plugin update moves the plugin folder
+        link = Path.home() / ".local/bin/lagom"
+        if s.get("installed") and os.environ.get("HERDR_PLUGIN_ROOT") and link.is_symlink() and link.resolve() != ROOT / "bin/lagom":
+            link.unlink()
+            link.symlink_to(ROOT / "bin/lagom")
+        return
+    if cmd == "install":
+        link = Path.home() / ".local/bin/lagom"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if link.is_symlink() or not link.exists():
+            link.unlink(missing_ok=True)
+            link.symlink_to(ROOT / "bin/lagom")  # ROOT was resolved at start: safe when run through the link
+        backup(HERDR)
+        herdr_hooks(True)
+        claude_hooks(True)
+        wez_install(term_home(s), True)
+        if CCSL.exists() and not CCSL_TEMPLATE.exists():
+            backup(CCSL)
+            shutil.copy2(CCSL, CCSL_TEMPLATE)  # the layout stays yours; only its colours follow the theme
+        s["installed"] = True
+        s.setdefault("theme", "lagom-neon")
+        return apply(s)
+    if cmd == "uninstall":
+        herdr_hooks(False)
+        claude_hooks(False)
+        herdr_write(strip_block(HERDR.read_text()).rstrip("\n") + "\n")
+        wez_install(term_home(s), False)
+        (term_home(s) / ".config/wezterm/lagom-state.json").unlink(missing_ok=True)
+        wt = wt_settings(win_home(s)) if win_home(s) else None
+        if wt:
+            wt_restore(wt, s)
+        if CCSL_MINE.exists():  # the one-line layout was on: your own goes back
+            shutil.move(CCSL_MINE, CCSL_TEMPLATE)
+        if CCSL_TEMPLATE.exists():
+            shutil.move(CCSL_TEMPLATE, CCSL)
+        s.pop("statusline", None)
+        s["installed"] = False
+        save(s)
+        return print("lagom: removed from Herdr, WezTerm, Windows Terminal, ccstatusline and Claude Code. Backups: *.lagom-bak")
+    print(__doc__)
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

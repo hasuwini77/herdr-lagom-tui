@@ -1,0 +1,171 @@
+{
+  "version": 4,
+  "lines": [
+    [
+      {
+        "id": "l1-icon",
+        "type": "custom-text",
+        "customText": " ◆ ",
+        "merge": "no-padding",
+        "backgroundColor": "hex:5B3FD1",
+        "color": "hex:FFFFFF"
+      },
+      {
+        "id": "l1-padl",
+        "type": "custom-text",
+        "customText": " ",
+        "merge": "no-padding",
+        "backgroundColor": "hex:7C5CFF"
+      },
+      {
+        "id": "l1-model",
+        "type": "model",
+        "rawValue": true,
+        "bold": true,
+        "color": "hex:0B0E14",
+        "backgroundColor": "hex:7C5CFF"
+      },
+      {
+        "id": "l1-padr",
+        "type": "custom-text",
+        "customText": " ",
+        "merge": "no-padding",
+        "backgroundColor": "hex:7C5CFF"
+      },
+      {
+        "id": "l1-cap",
+        "type": "custom-text",
+        "customText": "",
+        "merge": "no-padding",
+        "color": "hex:7C5CFF"
+      },
+      {
+        "id": "s1",
+        "type": "separator",
+        "character": " ▏ ",
+        "color": "hex:79808E"
+      },
+      {
+        "id": "l1-lab",
+        "type": "custom-text",
+        "customText": "ctx ",
+        "merge": "no-padding",
+        "color": "hex:F0C755"
+      },
+      {
+        "id": "l1-bar",
+        "type": "context-bar",
+        "rawValue": true,
+        "metadata": {
+          "display": "slider-only"
+        },
+        "color": "hex:6B5A28"
+      },
+      {
+        "id": "s1b",
+        "type": "separator",
+        "character": " ",
+        "color": "hex:79808E"
+      },
+      {
+        "id": "l1-pct",
+        "type": "context-percentage",
+        "rawValue": true,
+        "color": "hex:F0C755"
+      },
+      {
+        "id": "s2",
+        "type": "separator",
+        "character": " ▏ ",
+        "color": "hex:79808E"
+      },
+      {
+        "id": "l2-lab",
+        "type": "custom-text",
+        "customText": "week ",
+        "merge": "no-padding",
+        "color": "hex:B69CFF"
+      },
+      {
+        "id": "l1-week",
+        "type": "weekly-usage",
+        "rawValue": true,
+        "color": "hex:B69CFF"
+      },
+      {
+        "id": "l1-dot",
+        "type": "custom-text",
+        "customText": " · ",
+        "merge": "no-padding",
+        "color": "hex:79808E"
+      },
+      {
+        "id": "l1-reset",
+        "type": "weekly-reset-timer",
+        "rawValue": true,
+        "metadata": {
+          "compact": "true"
+        },
+        "color": "hex:8B79C9"
+      },
+      {
+        "id": "s3",
+        "type": "separator",
+        "character": " ▏ ",
+        "color": "hex:79808E"
+      },
+      {
+        "id": "l1-giticon",
+        "type": "custom-text",
+        "customText": " ",
+        "merge": "no-padding",
+        "color": "hex:7CE38B",
+        "metadata": {
+          "hide": "merge-target-hidden"
+        }
+      },
+      {
+        "id": "l1-branch",
+        "type": "git-branch",
+        "rawValue": true,
+        "color": "hex:7CE38B",
+        "metadata": {
+          "hide": "no-git"
+        }
+      }
+    ],
+    [],
+    []
+  ],
+  "flexMode": "full-until-compact",
+  "compactThreshold": 60,
+  "colorLevel": 3,
+  "inheritSeparatorColors": false,
+  "globalBold": false,
+  "gitCacheTtlSeconds": 5,
+  "numberFormat": {
+    "percent": {
+      "style": "whole"
+    },
+    "token": {
+      "style": "compact"
+    },
+    "speed": {
+      "style": "whole"
+    }
+  },
+  "powerline": {
+    "enabled": false,
+    "separators": [
+      ""
+    ],
+    "separatorInvertBackground": [
+      false
+    ],
+    "startCaps": [],
+    "endCaps": [],
+    "theme": "custom",
+    "autoAlign": false,
+    "continueThemeAcrossLines": false
+  }
+}

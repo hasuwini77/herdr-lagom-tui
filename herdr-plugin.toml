@@ -1,0 +1,43 @@
+id = "hasuwini77.lagom"
+name = "Lagom"
+version = "0.12.0"
+min_herdr_version = "0.9.5"
+description = "Six themes and four wallpapers for the Herdr TUI and its terminal, dimmed to WCAG AA"
+platforms = ["linux", "macos"]
+
+# After `herdr plugin update` the plugin folder moves: keep ~/.local/bin/lagom pointing at it.
+[[startup]]
+command = ["python3", "bin/lagom", "relink"]
+
+[[actions]]
+id = "setup"
+title = "Lagom: set up (theme, keys, terminal, status line)"
+command = ["python3", "bin/lagom", "install"]
+
+[[actions]]
+id = "theme-next"
+title = "Lagom: next theme"
+command = ["python3", "bin/lagom", "theme", "next"]
+
+[[actions]]
+id = "wallpaper-next"
+title = "Lagom: next wallpaper"
+command = ["python3", "bin/lagom", "wallpaper", "next"]
+
+[[actions]]
+id = "next-blocked"
+title = "Lagom: focus the agent that has waited longest"
+command = ["python3", "bin/lagom", "blocked"]
+
+[[actions]]
+id = "remove"
+title = "Lagom: remove (restores your backups)"
+command = ["python3", "bin/lagom", "uninstall"]
+
+[[panes]]
+id = "menu"
+title = "Lagom"
+placement = "popup"
+width = 46
+height = 24
+command = ["python3", "bin/lagom", "menu"]

@@ -1,0 +1,98 @@
+From 163008615e9314ced20b9ada21be648b1b3b92d1 Mon Sep 17 00:00:00 2001
+From: hasuwini77 <114613121+hasuwini77@users.noreply.github.com>
+Date: Wed, 11 Nov 2026 08:45:00 +0100
+Subject: [PATCH] feat(ui): colour tab-bar status text by status mark (local
+ build)
+
+---
+ src/client/shell/tabs.rs | 61 ++++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 59 insertions(+), 2 deletions(-)
+
+diff --git a/src/client/shell/tabs.rs b/src/client/shell/tabs.rs
+index 3fdcf7dc..34215ea8 100644
+--- a/src/client/shell/tabs.rs
++++ b/src/client/shell/tabs.rs
+@@ -284,13 +284,54 @@ fn render_tab_bar_status(
+                 .bg(palette.accent)
+                 .add_modifier(Modifier::BOLD)
+         } else {
+-            Style::default().fg(palette.overlay1).bg(palette.panel_bg)
++            // Local build: a status mark colours the text that follows it.
++            let base = Style::default().fg(palette.overlay1).bg(palette.panel_bg);
++            let mut run_x = x;
++            for (run, mark) in status_mark_runs(&segment.text) {
++                let run_width = display_width(run);
++                let style = match mark {
++                    Some('×') => base.fg(palette.red),
++                    Some('◐') => base.fg(palette.peach),
++                    Some('✓') => base.fg(palette.green),
++                    Some('○') => base.fg(palette.overlay0),
++                    _ => base,
++                };
++                put_text(buffer, run_x, area.y, run_width, run, style);
++                run_x = run_x.saturating_add(run_width);
++            }
++            x = x.saturating_add(width);
++            continue;
+         };
+         put_text(buffer, x, area.y, width, &segment.text, style);
+         x = x.saturating_add(width);
+     }
+ }
+ 
++/// Local build: splits status text into runs, each starting at a status mark
++/// (`×` blocked, `◐` working, `✓` done, `○` idle) or at a `│` divider, which
++/// ends the colour of the run before it.
++fn status_mark_runs(text: &str) -> Vec<(&str, Option<char>)> {
++    let mut runs = Vec::new();
++    let mut start = 0;
++    let mut mark = None;
++    for (index, character) in text.char_indices() {
++        let next = match character {
++            '×' | '◐' | '✓' | '○' => Some(character),
++            '│' => None,
++            _ => continue,
++        };
++        if index > start {
++            runs.push((&text[start..index], mark));
++        }
++        start = index;
++        mark = next;
++    }
++    if start < text.len() {
++        runs.push((&text[start..], mark));
++    }
++    runs
++}
++
+ fn tab_drop_indicator_x(
+     hits: &ShellHitMap,
+     tabs: &[&ClientShellTab],
+@@ -381,7 +422,23 @@ fn tab_label(tab: &ClientShellTab) -> String {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::max_tab_scroll;
++    use super::{max_tab_scroll, status_mark_runs};
++
++    #[test]
++    fn status_marks_split_text_into_coloured_runs() {
++        assert_eq!(status_mark_runs("host"), vec![("host", None)]);
++        assert_eq!(status_mark_runs(""), Vec::<(&str, Option<char>)>::new());
++        assert_eq!(
++            status_mark_runs("◐ build · working  │  × 1 needs you  ✓ 2 done  ○ 7 idle"),
++            vec![
++                ("◐ build · working  ", Some('◐')),
++                ("│  ", None),
++                ("× 1 needs you  ", Some('×')),
++                ("✓ 2 done  ", Some('✓')),
++                ("○ 7 idle", Some('○')),
++            ]
++        );
++    }
+ 
+     #[test]
+     fn trailing_scroll_limit_accounts_for_full_widths_and_separators() {
+-- 
+2.34.1
+
