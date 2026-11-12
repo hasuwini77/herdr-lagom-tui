@@ -19,14 +19,23 @@
 
 Python 3 standard library only. Every file it edits is backed up next to it once (*.lagom-bak).
 """
-import json, os, re, shutil, subprocess, sys
+import json, os, platform, re, shlex, shutil, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE = Path.home() / ".config/lagom/state.json"
-HERDR = Path.home() / ".config/herdr/config.toml"
+def herdr_config():
+    """Where Herdr reads config.toml: HERDR_CONFIG_PATH (Herdr's documented override), else ~/.config/herdr."""
+    if os.environ.get("HERDR_CONFIG_PATH"):
+        return Path(os.environ["HERDR_CONFIG_PATH"]).expanduser()
+    return Path.home() / ".config/herdr/config.toml"
+
+HERDR = herdr_config()
 BEGIN, END = "# >>> lagom (managed by the `lagom` command; your own lines stay outside)", "# <<< lagom"
 TAG = "# lagom"
+WINDOWS = os.name == "nt"  # native Windows; WSL counts as Linux
+HERDR_BIN = os.environ.get("HERDR_BIN_PATH") or shutil.which("herdr") or "herdr"  # which() also finds herdr.exe
+LINK = Path.home() / ".local/bin" / ("lagom.cmd" if WINDOWS else "lagom")
 TARGET = 4.5  # WCAG 2.2 AA for text
 LAST = {}  # what the last apply() did, for the menu; never saved
 
@@ -101,8 +110,13 @@ def backup(path):
     if path.exists() and not bak.exists():
         shutil.copy2(path, bak)
 
+def is_wsl():
+    return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
+
 def win_home(s):
     """The Windows home as a WSL path, or None outside WSL. Looked up once, then remembered."""
+    if not is_wsl():
+        return None  # macOS, Linux, native Windows: no cmd.exe round trip
     if "win_home" not in s:
         try:
             out = subprocess.run(["cmd.exe", "/c", "echo %USERPROFILE%"], capture_output=True, text=True, timeout=15, cwd="/mnt/c").stdout.strip()
@@ -120,6 +134,28 @@ def term_path(s, p):
     if not win_home(s):
         return str(p)
     return subprocess.run(["wslpath", "-m", str(p)], capture_output=True, text=True).stdout.strip()
+
+def wt_home(s):
+    """Where Windows Terminal keeps settings.json: the Windows home from WSL, or this home on Windows."""
+    return win_home(s) or (Path.home() if WINDOWS else None)
+
+def self_cmd(*args):
+    """How Herdr and Claude Code call lagom: always through ~/.local/bin (a link, or lagom.cmd on Windows),
+    so a moved plugin folder or a new Python only needs the link redone. Quoted only when the path needs it."""
+    base = (f'"{LINK}"' if " " in str(LINK) else str(LINK)) if WINDOWS else shlex.quote(str(LINK))
+    return " ".join([base, *args])
+
+def toml_str(v):
+    return json.dumps(v, ensure_ascii=False)  # JSON escapes are TOML escapes; no \\u surrogates for emoji
+
+def link_self():
+    """~/.local/bin/lagom: a symlink on macOS and Linux, a .cmd shim on Windows (no admin needed)."""
+    LINK.parent.mkdir(parents=True, exist_ok=True)
+    if WINDOWS:
+        LINK.write_text(f'@"{sys.executable}" "{ROOT / "bin" / "lagom"}" %*\r\n')
+    elif LINK.is_symlink() or not LINK.exists():
+        LINK.unlink(missing_ok=True)
+        LINK.symlink_to(ROOT / "bin/lagom")  # ROOT was resolved at start: safe when run through the link
 
 def mix(a, b, k):
     """Colour a moved k of the way to colour b."""
@@ -152,26 +188,44 @@ def strip_block(text):
 
 def herdr_write(text):
     """Writes config.toml only if Herdr accepts it; otherwise puts the old one back."""
-    old = HERDR.read_text()
+    old = HERDR.read_text(encoding="utf-8")
     if text == old:
         return
-    HERDR.write_text(text)
-    check = subprocess.run(["herdr", "config", "check"], capture_output=True, text=True)
+    HERDR.write_text(text, encoding="utf-8")
+    check = subprocess.run([HERDR_BIN, "config", "check"], capture_output=True, text=True)
     if check.returncode != 0:
-        HERDR.write_text(old)
+        HERDR.write_text(old, encoding="utf-8")
         sys.exit("lagom: Herdr refused the config, nothing changed:\n" + (check.stdout + check.stderr).strip())
-    subprocess.run(["herdr", "server", "reload-config"], capture_output=True)
+    subprocess.run([HERDR_BIN, "server", "reload-config"], capture_output=True)
+
+PARK = "#lagom-off# "
+HEADER = re.compile(r"^\[\[?\s*([A-Za-z0-9_\-.\"' ]+?)\s*\]\]?\s*(#.*)?$")
+
+def park_theme(text):
+    """Comments out your own [theme] tables: TOML allows one, and Lagom's block brings it. Uninstall puts them back."""
+    out, inside, depth = [], False, 0
+    for line in text.split("\n"):
+        code = re.sub(r'"(?:\\.|[^"\\])*"|\'[^\']*\'|#.*', "", line)  # brackets in strings and comments don't count
+        head = HEADER.match(line) if depth == 0 else None
+        if not head:
+            depth = max(0, depth + code.count("[") - code.count("]"))  # inside a multi-line array
+        if head:
+            inside = re.match(r"theme(\.|$)", head.group(1).strip("\"' ")) is not None
+        out.append(PARK + line if inside and line.strip() else line)
+    return "\n".join(out)
+
+def unpark_theme(text):
+    return "\n".join(l[len(PARK):] if l.startswith(PARK) else l for l in text.split("\n"))
 
 def herdr_apply(t, see_through):
     if HERDR.exists():
-        herdr_write(strip_block(HERDR.read_text()).rstrip("\n") + "\n\n" + herdr_block(t, see_through))
+        herdr_write(park_theme(strip_block(HERDR.read_text(encoding="utf-8"))).rstrip("\n") + "\n\n" + herdr_block(t, see_through))
 
 def herdr_hooks(on):
     """The tab-bar status line and the next-blocked key; each line carries TAG so it can be removed."""
-    text = "\n".join(l for l in HERDR.read_text().split("\n") if not l.rstrip().endswith(TAG))
+    text = "\n".join(l for l in HERDR.read_text(encoding="utf-8").split("\n") if not l.rstrip().endswith(TAG))
     if on:
-        exe = str(Path.home() / ".local/bin/lagom")
-        bar = f'tab_bar_right = [{{ type = "command", command = "{exe} status", interval_seconds = 3, timeout_seconds = 2 }}] {TAG}'
+        bar = f'tab_bar_right = [{{ type = "command", command = {toml_str(self_cmd("status"))}, interval_seconds = 3, timeout_seconds = 2 }}] {TAG}'
         if re.search(r"^tab_bar_right\s*=", text, flags=re.M):
             print("lagom: you already have a tab_bar_right; add this entry yourself:\n  " + bar)
         elif re.search(r"^\[ui\]$", text, flags=re.M):
@@ -180,12 +234,12 @@ def herdr_hooks(on):
                 text = re.sub(r"^\[ui\]$", f"[ui]\nshow_agent_labels_on_pane_borders = true {TAG}", text, count=1, flags=re.M)
         else:
             text = f"[ui]\nshow_agent_labels_on_pane_borders = true {TAG}\n{bar}\n\n{text}"
-        keys = [("prefix+shift+b", "shell", f"{exe} blocked", "lagom: next agent that needs you", None),
-                ("prefix+comma", "popup", f"{exe} menu", "lagom: look settings", ("46", "24"))]
-        keys.append(("prefix+shift+e", "shell", f"{exe} files", "lagom: file panel on the right", None))
+        keys = [("prefix+shift+b", "shell", self_cmd("blocked"), "lagom: next agent that needs you", None),
+                ("prefix+comma", "popup", self_cmd("menu"), "lagom: look settings", ("46", "24")),
+                ("prefix+shift+e", "shell", self_cmd("files"), "lagom: file panel on the right", None)]
         blocks = []
         for key, kind, command, about, size in keys:
-            lines = ["[[keys.command]]", f'key = "{key}"', f'type = "{kind}"', f'command = "{command}"', f'description = "{about}"']
+            lines = ["[[keys.command]]", f'key = "{key}"', f'type = "{kind}"', f'command = {toml_str(command)}', f'description = "{about}"']
             lines += [f"width = {size[0]}", f"height = {size[1]}"] if size else []
             blocks.append("\n".join(f"{l} {TAG}" for l in lines))
         text = strip_block(text).rstrip("\n") + "\n\n" + "\n\n".join(blocks) + "\n"
@@ -328,7 +382,7 @@ def apply(s):
     name = s.get("theme") or "lagom-neon"
     t = themes()[name]
     wall = s.get("wallpaper", "keep")
-    home, wt_home, bg, note = term_home(s), win_home(s), None, ""
+    home, wt_dir, bg, note = term_home(s), wt_home(s), None, ""
     if wall == "keep":
         bg, note = "keep", "your terminal's own background"
     elif wall:
@@ -347,7 +401,7 @@ def apply(s):
     if home:
         if (home / ".config/wezterm/lagom.lua").exists():
             (home / ".config/wezterm/lagom-state.json").write_text(json.dumps(wez_state(t, bg), indent=2) + "\n")
-    wt = wt_settings(wt_home) if wt_home else None
+    wt = wt_settings(wt_dir) if wt_dir else None
     if wt and s.get("installed"):
         wt_apply(wt, s, t, bg)
     ccsl_apply(t)
@@ -363,7 +417,7 @@ WORD = {"working": "working", "blocked": "needs you", "done": "done", "idle": "i
 
 def agents():
     try:
-        out = subprocess.run(["herdr", "agent", "list"], capture_output=True, text=True, timeout=2).stdout
+        out = subprocess.run([HERDR_BIN, "agent", "list"], capture_output=True, text=True, timeout=2).stdout
         return json.loads(out)["result"]["agents"]
     except (OSError, ValueError, KeyError, subprocess.SubprocessError):
         return []
@@ -383,7 +437,7 @@ def status():
 def blocked():
     waiting = sorted((a for a in agents() if a["agent_status"] == "blocked"), key=lambda a: a.get("state_change_seq", 0))
     if waiting:
-        subprocess.run(["herdr", "agent", "focus", waiting[0]["pane_id"]], capture_output=True)
+        subprocess.run([HERDR_BIN, "agent", "focus", waiting[0]["pane_id"]], capture_output=True)
 
 # ---- your own theme --------------------------------------------------------------
 
@@ -411,7 +465,7 @@ def hook():
             if topic and topic != "Claude Code":
                 label += " · " + topic
             args = ["--display-agent", clip(label, TITLE_COLS)]
-        subprocess.run(["herdr", "pane", "report-metadata", pane, "--source", "lagom", *args], capture_output=True, timeout=3)
+        subprocess.run([HERDR_BIN, "pane", "report-metadata", pane, "--source", "lagom", *args], capture_output=True, timeout=3)
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
 
@@ -421,10 +475,11 @@ def claude_hooks(on):
         return
     old = CLAUDE.read_text()
     doc = json.loads(old)
-    cmd = str(Path.home() / ".local/bin/lagom") + " hook"
+    cmd = self_cmd("hook")
+    ours = lambda h: h.get("command") == cmd or re.search(r"[\\/]\.local[\\/]bin[\\/]lagom(\.cmd)?[\"']? hook$", h.get("command") or "")
     hooks = doc.get("hooks", {})
     for ev in list(hooks):
-        hooks[ev] = [g for g in hooks[ev] if not any(h.get("command") == cmd for h in g.get("hooks", []))]
+        hooks[ev] = [g for g in hooks[ev] if not any(ours(h) for h in g.get("hooks", []))]
         if not hooks[ev]:
             del hooks[ev]
     if on:
@@ -491,8 +546,15 @@ def custom(s, accent, background=None):
 
 # ---- the menu --------------------------------------------------------------------
 
+def need_curses():
+    try:
+        import curses
+        return curses
+    except ImportError:  # Windows Python ships without it
+        sys.exit("lagom: the menu and the file tree need curses. On Windows: py -m pip install windows-curses")
+
 def menu(s):
-    import curses
+    curses = need_curses()
     LAST["quiet"] = True  # the menu shows the result itself
     def rows():
         out = [("head", "Theme", None)]
@@ -544,7 +606,7 @@ def menu(s):
 PANEL, PANEL_COLS = "files", 38
 
 def herdr_json(*args):
-    out = subprocess.run(["herdr", *args], capture_output=True, text=True, timeout=5).stdout
+    out = subprocess.run([HERDR_BIN, *args], capture_output=True, text=True, timeout=5).stdout
     return json.loads(out).get("result", {})
 
 def files():
@@ -553,15 +615,15 @@ def files():
     lay = herdr_json("pane", "layout", "--pane", here)["layout"]
     for p in herdr_json("pane", "list").get("panes", []):
         if p.get("tab_id") == lay["tab_id"] and p.get("label") == PANEL:
-            return subprocess.run(["herdr", "pane", "close", p["pane_id"]], capture_output=True)
+            return subprocess.run([HERDR_BIN, "pane", "close", p["pane_id"]], capture_output=True)
     edge = lay["area"]["x"] + lay["area"]["width"]
     right = max((p for p in lay["panes"] if p["rect"]["x"] + p["rect"]["width"] == edge), key=lambda p: p["rect"]["height"])
     ratio = max(.5, round(1 - PANEL_COLS / right["rect"]["width"], 3))
     cwd = herdr_json("pane", "get", here)["pane"].get("foreground_cwd") or str(Path.home())
     new = herdr_json("pane", "split", right["pane_id"], "--direction", "right", "--ratio", str(ratio), "--cwd", cwd, "--focus")["pane"]["pane_id"]
-    subprocess.run(["herdr", "pane", "rename", new, PANEL], capture_output=True)
-    exe = Path.home() / ".local/bin/lagom"
-    subprocess.run(["herdr", "pane", "run", new, f"LAGOM_ORIGIN={here} exec {exe} tree"], capture_output=True)  # q closes the panel
+    subprocess.run([HERDR_BIN, "pane", "rename", new, PANEL], capture_output=True)
+    run = self_cmd("tree", here) if WINDOWS else "exec " + self_cmd("tree", here)  # exec: q closes the panel
+    subprocess.run([HERDR_BIN, "pane", "run", new, run], capture_output=True)
 
 # Nerd Font glyphs and an ANSI colour (1 red, 2 green, 3 yellow, 4 blue, 5 magenta, 6 cyan) per kind of file.
 ICONS = {
@@ -587,10 +649,10 @@ def icon(name, is_dir, is_open, plain):
         return ICONS["open" if is_open else "dir"]
     return ICONS.get(name.rsplit(".", 1)[-1].lower() if "." in name else "", ICONS["file"])
 
-def tree(s):
+def tree(s, origin=None):
     """A file tree like an editor's sidebar: folders open in place, click or Enter, coloured icons."""
-    import curses
-    root, origin = Path.cwd(), os.environ.get("LAGOM_ORIGIN")
+    curses = need_curses()
+    root, origin = Path.cwd(), origin or os.environ.get("LAGOM_ORIGIN")
     opened, hidden, plain = {root}, False, s.get("icons") == "plain"
 
     def listing():
@@ -686,7 +748,7 @@ def tree(s):
                     opened.discard(p) if p in opened and key != curses.KEY_RIGHT else opened.add(p)
                 elif key != curses.KEY_RIGHT:
                     if origin:  # hand the file to the pane the panel was opened from, as an @mention
-                        subprocess.run(["herdr", "pane", "send-text", origin, "@" + os.path.relpath(p, Path.cwd()) + " "], capture_output=True)
+                        subprocess.run([HERDR_BIN, "pane", "send-text", origin, "@" + os.path.relpath(p, Path.cwd()) + " "], capture_output=True)
                         msg = "sent @" + p.name
                     else:
                         msg = str(p)
@@ -694,7 +756,11 @@ def tree(s):
                 curses.endwin()
                 subprocess.run([shutil.which("bat") or "less", str(p)] if shutil.which("bat") else ["less", "-R", str(p)])
                 scr.clear()
-    curses.wrapper(run)
+    try:
+        curses.wrapper(run)
+    finally:  # Windows has no `exec`: close the panel pane ourselves, however the tree ends
+        if WINDOWS and origin and os.environ.get("HERDR_PANE_ID"):
+            subprocess.run([HERDR_BIN, "pane", "close", os.environ["HERDR_PANE_ID"]], capture_output=True)
 
 # ---- commands --------------------------------------------------------------------
 
@@ -713,7 +779,7 @@ def main(argv):
     if cmd == "files":
         return files()
     if cmd == "tree":
-        return tree(s)
+        return tree(s, arg)
     if cmd == "menu":
         return menu(s)
     if cmd == "hook":
@@ -759,17 +825,12 @@ def main(argv):
         s["wallpaper"] = choice
         return apply(s)
     if cmd == "relink":  # run by Herdr at startup: a plugin update moves the plugin folder
-        link = Path.home() / ".local/bin/lagom"
-        if s.get("installed") and os.environ.get("HERDR_PLUGIN_ROOT") and link.is_symlink() and link.resolve() != ROOT / "bin/lagom":
-            link.unlink()
-            link.symlink_to(ROOT / "bin/lagom")
+        if s.get("installed") and os.environ.get("HERDR_PLUGIN_ROOT"):
+            if WINDOWS or (LINK.is_symlink() and LINK.resolve() != ROOT / "bin/lagom"):
+                link_self()
         return
     if cmd == "install":
-        link = Path.home() / ".local/bin/lagom"
-        link.parent.mkdir(parents=True, exist_ok=True)
-        if link.is_symlink() or not link.exists():
-            link.unlink(missing_ok=True)
-            link.symlink_to(ROOT / "bin/lagom")  # ROOT was resolved at start: safe when run through the link
+        link_self()
         HERDR.parent.mkdir(parents=True, exist_ok=True)
         HERDR.touch()  # a fresh Herdr has no config.toml yet
         backup(HERDR)
@@ -778,6 +839,7 @@ def main(argv):
         wez_install(term_home(s), True)
         if CCSL.exists() and not CCSL_TEMPLATE.exists():
             backup(CCSL)
+            CCSL_TEMPLATE.parent.mkdir(parents=True, exist_ok=True)  # first run: ~/.config/lagom is not there yet
             shutil.copy2(CCSL, CCSL_TEMPLATE)  # the layout stays yours; only its colours follow the theme
         s["installed"] = True
         s.setdefault("theme", "lagom-neon")
@@ -787,10 +849,10 @@ def main(argv):
             sys.exit("lagom: nothing to remove, Herdr has no config.toml")
         herdr_hooks(False)
         claude_hooks(False)
-        herdr_write(strip_block(HERDR.read_text()).rstrip("\n") + "\n")
+        herdr_write(unpark_theme(strip_block(HERDR.read_text(encoding="utf-8"))).rstrip("\n") + "\n")
         wez_install(term_home(s), False)
         (term_home(s) / ".config/wezterm/lagom-state.json").unlink(missing_ok=True)
-        wt = wt_settings(win_home(s)) if win_home(s) else None
+        wt = wt_settings(wt_home(s)) if wt_home(s) else None
         if wt:
             wt_restore(wt, s)
         if CCSL_MINE.exists():  # the one-line layout was on: your own goes back

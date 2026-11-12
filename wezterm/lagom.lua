@@ -25,6 +25,7 @@ function M.apply(config, wezterm)
 
   config.window_background_opacity = 1.0
   config.win32_system_backdrop = 'Disable'
+  config.macos_window_background_blur = 0 -- opaque window: a blur would only cost GPU time
   if type(bg) == 'table' then
     -- Herdr paints its panes with an explicit background colour, which WezTerm draws solid.
     -- Letting such cells through shows the picture inside the panes too.
