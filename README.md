@@ -34,16 +34,32 @@ herdr plugin action invoke hasuwini77.lagom.setup     # hooks in, links ~/.local
 
 Or without the plugin system: `git clone https://github.com/hasuwini77/herdr-lagom-tui && herdr-lagom-tui/bin/lagom install`.
 
-Needs Python 3 and Herdr 0.9.5 or later. Tested on Linux under WSL2; macOS is untested. To undo everything:
-`lagom uninstall`.
+On native Windows (no WSL) the plugin system needs `python3` on PATH, so use the clone:
+
+```powershell
+git clone https://github.com/hasuwini77/herdr-lagom-tui
+py herdr-lagom-tui\bin\lagom install
+py -m pip install windows-curses   # only for the menu and the file tree
+```
+
+Needs Python 3 and Herdr 0.9.5 or later. To undo everything: `lagom uninstall`.
+
+| Platform | Status |
+| --- | --- |
+| macOS (WezTerm) | used daily on Apple silicon |
+| Linux, WSL2 (WezTerm, Windows Terminal) | used daily under WSL2 |
+| Windows, native (WezTerm, Windows Terminal) | covered by `tests/smoke.py`; `lagom` is a `.cmd` shim in `~/.local/bin` |
+
+`python tests/smoke.py` installs, switches theme and wallpaper, and uninstalls in a throwaway home with a fake
+Herdr, then checks that every file is back as it was.
 
 It drives five things from one command:
 
 | What | How |
 | --- | --- |
-| Herdr TUI | a managed `[theme]` block in `~/.config/herdr/config.toml`, then `herdr server reload-config` |
+| Herdr TUI | a managed `[theme]` block in `~/.config/herdr/config.toml` (or `$HERDR_CONFIG_PATH`), then `herdr server reload-config`; your own `[theme]` tables are commented out with `#lagom-off#` and come back on uninstall |
 | WezTerm | `lagom.lua` reads `lagom-state.json`; WezTerm reloads when that file changes |
-| Windows Terminal | a `Lagom` colour scheme, tab strip theme and background image in `settings.json` |
+| Windows Terminal | a `Lagom` colour scheme, tab strip theme and background image in `settings.json` (from WSL or native Windows) |
 | ccstatusline | the colours of `~/.config/ccstatusline/settings.json`; your layout is kept as the template |
 | Claude Code | `lagom hook` (pane titles) on four hook events in `~/.claude/settings.json`; your other hooks stay |
 
@@ -104,7 +120,8 @@ gets it as a colour layer, Windows Terminal as `backgroundImageOpacity`.
 
 ## Limits
 
-- Windows Terminal is themed only under WSL. WezTerm is themed on WSL, macOS and Linux; macOS is untested.
+- WezTerm is themed on macOS, Linux, WSL and Windows; Windows Terminal from WSL or native Windows. On macOS a
+  Lagom wallpaper turns WezTerm's window blur off: the window is opaque, so the blur only costs GPU time.
 - The WezTerm hook needs `return config` at the end of `.wezterm.lua` (or `.config/wezterm/wezterm.lua`).
 - File icons need a Nerd Font in Windows Terminal (restart it after installing one); WezTerm ships the symbols itself.
 - Icons are font glyphs, one colour each: a terminal cannot draw VS Code's picture icons.
