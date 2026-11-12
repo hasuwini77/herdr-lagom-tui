@@ -46,8 +46,8 @@ Needs Python 3 and Herdr 0.9.5 or later. To undo everything: `lagom uninstall`.
 
 | Platform | Status |
 | --- | --- |
-| macOS (WezTerm) | used daily on Apple silicon |
-| Linux, WSL2 (WezTerm, Windows Terminal) | used daily under WSL2 |
+| macOS (WezTerm) | tested on Apple silicon, macOS 26 |
+| Linux, WSL2 (WezTerm, Windows Terminal) | tested under WSL2 |
 | Windows, native (WezTerm, Windows Terminal) | covered by `tests/smoke.py`; `lagom` is a `.cmd` shim in `~/.local/bin` |
 
 `python tests/smoke.py` installs, switches theme and wallpaper, and uninstalls in a throwaway home with a fake
