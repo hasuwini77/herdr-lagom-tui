@@ -833,6 +833,7 @@ def main(argv):
         wez_install(term_home(s), True)
         if CCSL.exists() and not CCSL_TEMPLATE.exists():
             backup(CCSL)
+            CCSL_TEMPLATE.parent.mkdir(parents=True, exist_ok=True)  # first run: ~/.config/lagom is not there yet
             shutil.copy2(CCSL, CCSL_TEMPLATE)  # the layout stays yours; only its colours follow the theme
         s["installed"] = True
         s.setdefault("theme", "lagom-neon")

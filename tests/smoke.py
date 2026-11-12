@@ -48,6 +48,10 @@ def main():
         config.write_text(USER_CONFIG)
         env.update(HERDR_BIN_PATH=str(herdr), HERDR_CONFIG_PATH=str(config))
         (home / ".wezterm.lua").write_text("local wezterm = require 'wezterm'\nlocal config = wezterm.config_builder()\nreturn config\n")
+        ccsl = home / ".config/ccstatusline/settings.json"
+        ccsl.parent.mkdir(parents=True)
+        CCSL_BEFORE = json.dumps({"lines": [[{"type": "model", "color": "hex:7C5CFF"}]]}) + "\n"
+        ccsl.write_text(CCSL_BEFORE)
         claude = home / ".claude/settings.json"
         claude.parent.mkdir()
         claude.write_text(json.dumps({"hooks": {"Stop": [{"hooks": [USER_HOOK]}]}}, indent=2) + "\n")
@@ -79,12 +83,14 @@ def main():
         assert sum("lagom" in h["command"] for ev in hooks.values() for g in ev for h in g["hooks"]) == 4
         assert USER_HOOK in [h for g in hooks["Stop"] for h in g["hooks"]]
 
+        assert "hex:7C5CFF" not in ccsl.read_text(), "ccstatusline colours did not follow the theme"
         assert lagom("status") == "no agents"
         print(lagom("uninstall"))
 
         assert config.read_text().rstrip("\n") == USER_CONFIG.rstrip("\n"), "config.toml not restored:\n" + config.read_text()
         assert json.loads(claude.read_text()) == {"hooks": {"Stop": [{"hooks": [USER_HOOK]}]}}
         assert "lagom" not in (home / ".wezterm.lua").read_text()
+        assert ccsl.read_text() == CCSL_BEFORE, "ccstatusline layout not restored"
     print("smoke: ok")
 
 
