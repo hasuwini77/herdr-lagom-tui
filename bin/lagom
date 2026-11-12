@@ -24,7 +24,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 STATE = Path.home() / ".config/lagom/state.json"
-HERDR = Path.home() / ".config/herdr/config.toml"
+def herdr_config():
+    """Where Herdr reads config.toml: HERDR_CONFIG_PATH, else $XDG_CONFIG_HOME/herdr, else ~/.config/herdr."""
+    if os.environ.get("HERDR_CONFIG_PATH"):
+        return Path(os.environ["HERDR_CONFIG_PATH"]).expanduser()
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "herdr/config.toml"
+
+HERDR = herdr_config()
 BEGIN, END = "# >>> lagom (managed by the `lagom` command; your own lines stay outside)", "# <<< lagom"
 TAG = "# lagom"
 TARGET = 4.5  # WCAG 2.2 AA for text
@@ -162,9 +168,25 @@ def herdr_write(text):
         sys.exit("lagom: Herdr refused the config, nothing changed:\n" + (check.stdout + check.stderr).strip())
     subprocess.run(["herdr", "server", "reload-config"], capture_output=True)
 
+PARK = "#lagom-off# "
+HEADER = re.compile(r"^\[\[?\s*([A-Za-z0-9_\-.\"' ]+?)\s*\]\]?\s*(#.*)?$")
+
+def park_theme(text):
+    """Comments out your own [theme] tables: TOML allows one, and Lagom's block brings it. Uninstall puts them back."""
+    out, inside = [], False
+    for line in text.split("\n"):
+        head = HEADER.match(line)
+        if head:
+            inside = re.match(r"theme(\.|$)", head.group(1).strip("\"' ")) is not None
+        out.append(PARK + line if inside and line.strip() else line)
+    return "\n".join(out)
+
+def unpark_theme(text):
+    return "\n".join(l[len(PARK):] if l.startswith(PARK) else l for l in text.split("\n"))
+
 def herdr_apply(t, see_through):
     if HERDR.exists():
-        herdr_write(strip_block(HERDR.read_text()).rstrip("\n") + "\n\n" + herdr_block(t, see_through))
+        herdr_write(park_theme(strip_block(HERDR.read_text())).rstrip("\n") + "\n\n" + herdr_block(t, see_through))
 
 def herdr_hooks(on):
     """The tab-bar status line and the next-blocked key; each line carries TAG so it can be removed."""
@@ -787,7 +809,7 @@ def main(argv):
             sys.exit("lagom: nothing to remove, Herdr has no config.toml")
         herdr_hooks(False)
         claude_hooks(False)
-        herdr_write(strip_block(HERDR.read_text()).rstrip("\n") + "\n")
+        herdr_write(unpark_theme(strip_block(HERDR.read_text())).rstrip("\n") + "\n")
         wez_install(term_home(s), False)
         (term_home(s) / ".config/wezterm/lagom-state.json").unlink(missing_ok=True)
         wt = wt_settings(win_home(s)) if win_home(s) else None
