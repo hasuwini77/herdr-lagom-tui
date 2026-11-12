@@ -11,11 +11,18 @@ the colours, the wallpaper and the status in the tab bar. Three things in the pi
 [`hasuwini77.spinner`](https://github.com/hasuwini77/herdr-spinner) plugin and one sidebar row in your config; the
 ` SPACES ───── 6` / ` AGENTS ───── 7` headings and the colours in the tab-bar status need a patched Herdr build.
 
+Other looks, same session and same extras. Each is two commands: `lagom theme <name>`, `lagom wallpaper <name>`.
+
+| | |
+|---|---|
+| ![neon theme, nebula wallpaper](docs/look-neon-nebula.png) neon + nebula | ![palenight theme, starfield wallpaper](docs/look-palenight-starfield.png) palenight + starfield |
+| ![moss theme, nebula wallpaper](docs/look-moss-nebula.png) moss + nebula | ![paper theme, dawn wallpaper](docs/look-paper-dawn.png) paper + dawn |
+
 ![Stock Herdr with only the graphite theme](docs/preview-stock.png)
 
 Stock Herdr 0.9.5 with nothing but the theme, in a plain terminal without a wallpaper.
 
-Both pictures are taken from a throwaway session: the workspaces are invented and the panes are stand-ins
+All pictures are taken from a throwaway session: the workspaces are invented and the panes are stand-ins
 (`docs/demo-setup.sh`).
 
 ## Install

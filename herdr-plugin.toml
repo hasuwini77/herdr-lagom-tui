@@ -1,6 +1,6 @@
 id = "hasuwini77.lagom"
 name = "Lagom"
-version = "0.12.2"
+version = "0.12.3"
 min_herdr_version = "0.9.5"
 description = "Six themes and four wallpapers for the Herdr TUI and its terminal, dimmed to WCAG AA"
 platforms = ["linux", "macos"]
