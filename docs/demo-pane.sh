@@ -1,8 +1,9 @@
 #!/bin/sh
 # One stand-in agent pane for the demo picture: prints a few invented lines, then waits.
-# No real agent runs. Usage: demo-pane.sh <lead|tests|ask|idle>
+# No real agent runs. Usage: demo-pane.sh <lead|tests|ask|idle> [title]
 c() { printf '\033[%sm' "$1"; }
 r=$(c 0); dim=$(c 90); blue=$(c 34); cyan=$(c 36); green=$(c 32); yellow=$(c 33); red=$(c 31); bold=$(c 1)
+[ -n "${2:-}" ] && printf '\033]0;%s\007' "$2"   # the terminal title: the topic `lagom status` shows
 clear
 case "${1:-lead}" in
 lead) cat <<EOT

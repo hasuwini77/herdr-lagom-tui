@@ -4,6 +4,7 @@ set -eu
 [ -f /tmp/.lagom-demo-statedir ] || exit 0
 here=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 . "$here/demo-env.sh"
-"${HERDR_BIN:-herdr}" session stop "$SESSION" >/dev/null 2>&1 || true
+[ -d "$state/spinner" ] && sh "$state/spinner/run.sh" --stop >/dev/null 2>&1 || true
+h server stop >/dev/null 2>&1 || true
 case "$state" in /tmp/*) rm -rf "$state" ;; esac
 rm -f /tmp/.lagom-demo-statedir

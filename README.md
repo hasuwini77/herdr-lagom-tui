@@ -3,10 +3,20 @@
 One look for the Herdr TUI, the terminal it runs in and the Claude Code status line. Six themes, four wallpapers, and a
 dimming that is measured from the picture so text stays at WCAG 2.2 AA (4.5:1).
 
-![The Herdr TUI in the graphite theme](docs/preview.png)
+![Herdr in WezTerm: graphite theme, starfield wallpaper, see-through panes](docs/preview.png)
 
-Stock Herdr 0.9.5 with the graphite theme. The workspaces are invented and the panes are stand-ins
-(`docs/demo-setup.sh`). The picture shows the Herdr side only: a wallpaper is drawn by WezTerm or Windows Terminal.
+The whole look in WezTerm: graphite theme, starfield wallpaper, panes you can see through. `lagom install` gives you
+the colours, the wallpaper and the status in the tab bar. Three things in the picture are extra, all described in
+[`patches/README.md`](patches/README.md): the spinner and agent logos come from the
+[`hasuwini77.spinner`](https://github.com/hasuwini77/herdr-spinner) plugin and one sidebar row in your config; the
+` SPACES ───── 6` / ` AGENTS ───── 7` headings and the colours in the tab-bar status need a patched Herdr build.
+
+![Stock Herdr with only the graphite theme](docs/preview-stock.png)
+
+Stock Herdr 0.9.5 with nothing but the theme, in a plain terminal without a wallpaper.
+
+Both pictures are taken from a throwaway session: the workspaces are invented and the panes are stand-ins
+(`docs/demo-setup.sh`).
 
 ## Install
 
@@ -83,7 +93,7 @@ gets it as a colour layer, Windows Terminal as `backgroundImageOpacity`.
 - `lib/measure.py` — picture measuring (Pillow, ImageMagick or a plain PNG reader)
 - `herdr-plugin.toml` — the plugin: a set-up action, next theme, next wallpaper, next blocked agent, the menu as a popup
 - `patches/` — two optional Herdr source patches (section headings, coloured tab-bar status); not needed for the themes
-- `docs/demo-*.sh` — builds the invented session the picture above was taken from
+- `docs/demo-*.sh` — builds the invented session the pictures above were taken from (`LAGOM_DEMO_FULL=1` for the whole look)
 
 ## Limits
 

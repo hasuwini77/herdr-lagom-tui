@@ -16,6 +16,7 @@ print(json.dumps(out))
 PY
 )
 . "$here/demo-env.sh"
+( mark_done ) >/dev/null 2>&1 &
 exec ttyd -p "${2:-7689}" -i 127.0.0.1 -W -t fontSize=14 -t "fontFamily=FiraCode Nerd Font, JetBrains Mono, monospace" \
   -t "theme=$colours" -t disableLeaveAlert=true -t titleFixed=lagom \
-  "${HERDR_BIN:-herdr}" --session "$SESSION"
+  "$state/bin/herdr"
