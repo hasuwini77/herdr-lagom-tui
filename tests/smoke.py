@@ -1,6 +1,6 @@
 """End-to-end smoke test for `lagom` on macOS, Linux and Windows, in a throwaway home with a fake Herdr.
 
-    python tests/smoke.py
+    python tests/smoke.py        # Python 3.11+ (tomllib)
 """
 import json, os, subprocess, sys, tempfile, tomllib
 from pathlib import Path
@@ -14,6 +14,9 @@ confirm_close = true
 
 [theme]
 name = "dracula"
+pinned = [
+["agent"]
+]
 
 [ui.sidebar.agents]
 rows = [
@@ -30,7 +33,7 @@ USER_HOOK = {"type": "command", "command": "echo mine", "timeout": 5}
 def main():
     with tempfile.TemporaryDirectory() as tmp:
         home = Path(tmp)
-        env = dict(os.environ, HOME=str(home), USERPROFILE=str(home), XDG_CONFIG_HOME=str(home / ".config"))
+        env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
         env.pop("HERDR_PANE_ID", None)
         env.pop("WSL_DISTRO_NAME", None)
         bindir = home / "fakebin"
