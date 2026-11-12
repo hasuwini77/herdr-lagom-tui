@@ -229,9 +229,9 @@ def herdr_hooks(on):
         if re.search(r"^tab_bar_right\s*=", text, flags=re.M):
             print("lagom: you already have a tab_bar_right; add this entry yourself:\n  " + bar)
         elif re.search(r"^\[ui\]$", text, flags=re.M):
-            text = re.sub(r"^\[ui\]$", "[ui]\n" + bar, text, count=1, flags=re.M)
+            text = re.sub(r"^\[ui\]$", lambda _: "[ui]\n" + bar, text, count=1, flags=re.M)  # a function: Windows backslashes stay as written
             if not re.search(r"^show_agent_labels_on_pane_borders\s*=", text, flags=re.M):  # pane title bars, like the App
-                text = re.sub(r"^\[ui\]$", f"[ui]\nshow_agent_labels_on_pane_borders = true {TAG}", text, count=1, flags=re.M)
+                text = re.sub(r"^\[ui\]$", lambda _: f"[ui]\nshow_agent_labels_on_pane_borders = true {TAG}", text, count=1, flags=re.M)
         else:
             text = f"[ui]\nshow_agent_labels_on_pane_borders = true {TAG}\n{bar}\n\n{text}"
         keys = [("prefix+shift+b", "shell", self_cmd("blocked"), "lagom: next agent that needs you", None),
