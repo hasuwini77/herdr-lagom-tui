@@ -179,7 +179,7 @@ def herdr_hooks(on):
             if not re.search(r"^show_agent_labels_on_pane_borders\s*=", text, flags=re.M):  # pane title bars, like the App
                 text = re.sub(r"^\[ui\]$", f"[ui]\nshow_agent_labels_on_pane_borders = true {TAG}", text, count=1, flags=re.M)
         else:
-            text = "[ui]\n" + bar + "\n\n" + text
+            text = f"[ui]\nshow_agent_labels_on_pane_borders = true {TAG}\n{bar}\n\n{text}"
         keys = [("prefix+shift+b", "shell", f"{exe} blocked", "lagom: next agent that needs you", None),
                 ("prefix+comma", "popup", f"{exe} menu", "lagom: look settings", ("46", "24"))]
         keys.append(("prefix+shift+e", "shell", f"{exe} files", "lagom: file panel on the right", None))
@@ -770,6 +770,8 @@ def main(argv):
         if link.is_symlink() or not link.exists():
             link.unlink(missing_ok=True)
             link.symlink_to(ROOT / "bin/lagom")  # ROOT was resolved at start: safe when run through the link
+        HERDR.parent.mkdir(parents=True, exist_ok=True)
+        HERDR.touch()  # a fresh Herdr has no config.toml yet
         backup(HERDR)
         herdr_hooks(True)
         claude_hooks(True)
@@ -781,6 +783,8 @@ def main(argv):
         s.setdefault("theme", "lagom-neon")
         return apply(s)
     if cmd == "uninstall":
+        if not HERDR.exists():
+            sys.exit("lagom: nothing to remove, Herdr has no config.toml")
         herdr_hooks(False)
         claude_hooks(False)
         herdr_write(strip_block(HERDR.read_text()).rstrip("\n") + "\n")
