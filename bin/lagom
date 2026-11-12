@@ -25,10 +25,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 STATE = Path.home() / ".config/lagom/state.json"
 def herdr_config():
-    """Where Herdr reads config.toml: HERDR_CONFIG_PATH, else $XDG_CONFIG_HOME/herdr, else ~/.config/herdr."""
+    """Where Herdr reads config.toml: HERDR_CONFIG_PATH (Herdr's documented override), else ~/.config/herdr."""
     if os.environ.get("HERDR_CONFIG_PATH"):
         return Path(os.environ["HERDR_CONFIG_PATH"]).expanduser()
-    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "herdr/config.toml"
+    return Path.home() / ".config/herdr/config.toml"
 
 HERDR = herdr_config()
 BEGIN, END = "# >>> lagom (managed by the `lagom` command; your own lines stay outside)", "# <<< lagom"
@@ -140,12 +140,13 @@ def wt_home(s):
     return win_home(s) or (Path.home() if WINDOWS else None)
 
 def self_cmd(*args):
-    """How Herdr and Claude Code call lagom: the ~/.local/bin link, or python + this script on Windows."""
-    base = f'"{sys.executable}" "{ROOT / "bin" / "lagom"}"' if WINDOWS else shlex.quote(str(LINK))
+    """How Herdr and Claude Code call lagom: always through ~/.local/bin (a link, or lagom.cmd on Windows),
+    so a moved plugin folder or a new Python only needs the link redone. Quoted only when the path needs it."""
+    base = (f'"{LINK}"' if " " in str(LINK) else str(LINK)) if WINDOWS else shlex.quote(str(LINK))
     return " ".join([base, *args])
 
 def toml_str(v):
-    return json.dumps(v)  # JSON string escapes are valid TOML basic-string escapes
+    return json.dumps(v, ensure_ascii=False)  # JSON escapes are TOML escapes; no \\u surrogates for emoji
 
 def link_self():
     """~/.local/bin/lagom: a symlink on macOS and Linux, a .cmd shim on Windows (no admin needed)."""
@@ -187,13 +188,13 @@ def strip_block(text):
 
 def herdr_write(text):
     """Writes config.toml only if Herdr accepts it; otherwise puts the old one back."""
-    old = HERDR.read_text()
+    old = HERDR.read_text(encoding="utf-8")
     if text == old:
         return
-    HERDR.write_text(text)
+    HERDR.write_text(text, encoding="utf-8")
     check = subprocess.run([HERDR_BIN, "config", "check"], capture_output=True, text=True)
     if check.returncode != 0:
-        HERDR.write_text(old)
+        HERDR.write_text(old, encoding="utf-8")
         sys.exit("lagom: Herdr refused the config, nothing changed:\n" + (check.stdout + check.stderr).strip())
     subprocess.run([HERDR_BIN, "server", "reload-config"], capture_output=True)
 
@@ -202,9 +203,12 @@ HEADER = re.compile(r"^\[\[?\s*([A-Za-z0-9_\-.\"' ]+?)\s*\]\]?\s*(#.*)?$")
 
 def park_theme(text):
     """Comments out your own [theme] tables: TOML allows one, and Lagom's block brings it. Uninstall puts them back."""
-    out, inside = [], False
+    out, inside, depth = [], False, 0
     for line in text.split("\n"):
-        head = HEADER.match(line)
+        code = re.sub(r'"(?:\\.|[^"\\])*"|\'[^\']*\'|#.*', "", line)  # brackets in strings and comments don't count
+        head = HEADER.match(line) if depth == 0 else None
+        if not head:
+            depth = max(0, depth + code.count("[") - code.count("]"))  # inside a multi-line array
         if head:
             inside = re.match(r"theme(\.|$)", head.group(1).strip("\"' ")) is not None
         out.append(PARK + line if inside and line.strip() else line)
@@ -215,11 +219,11 @@ def unpark_theme(text):
 
 def herdr_apply(t, see_through):
     if HERDR.exists():
-        herdr_write(park_theme(strip_block(HERDR.read_text())).rstrip("\n") + "\n\n" + herdr_block(t, see_through))
+        herdr_write(park_theme(strip_block(HERDR.read_text(encoding="utf-8"))).rstrip("\n") + "\n\n" + herdr_block(t, see_through))
 
 def herdr_hooks(on):
     """The tab-bar status line and the next-blocked key; each line carries TAG so it can be removed."""
-    text = "\n".join(l for l in HERDR.read_text().split("\n") if not l.rstrip().endswith(TAG))
+    text = "\n".join(l for l in HERDR.read_text(encoding="utf-8").split("\n") if not l.rstrip().endswith(TAG))
     if on:
         bar = f'tab_bar_right = [{{ type = "command", command = {toml_str(self_cmd("status"))}, interval_seconds = 3, timeout_seconds = 2 }}] {TAG}'
         if re.search(r"^tab_bar_right\s*=", text, flags=re.M):
@@ -472,7 +476,7 @@ def claude_hooks(on):
     old = CLAUDE.read_text()
     doc = json.loads(old)
     cmd = self_cmd("hook")
-    ours = lambda h: h.get("command") == cmd or re.search(r"lagom\"? hook$", h.get("command") or "")
+    ours = lambda h: h.get("command") == cmd or re.search(r"[\\/]\.local[\\/]bin[\\/]lagom(\.cmd)?[\"']? hook$", h.get("command") or "")
     hooks = doc.get("hooks", {})
     for ev in list(hooks):
         hooks[ev] = [g for g in hooks[ev] if not any(ours(h) for h in g.get("hooks", []))]
@@ -723,8 +727,6 @@ def tree(s, origin=None):
             elif key in (curses.KEY_NPAGE, curses.KEY_PPAGE):
                 at += body if key == curses.KEY_NPAGE else -body
             elif key == ord("q"):
-                if WINDOWS and origin and os.environ.get("HERDR_PANE_ID"):  # no `exec` there: close the panel ourselves
-                    subprocess.run([HERDR_BIN, "pane", "close", os.environ["HERDR_PANE_ID"]], capture_output=True)
                 return
             elif key == ord("."):
                 hidden = not hidden
@@ -754,7 +756,11 @@ def tree(s, origin=None):
                 curses.endwin()
                 subprocess.run([shutil.which("bat") or "less", str(p)] if shutil.which("bat") else ["less", "-R", str(p)])
                 scr.clear()
-    curses.wrapper(run)
+    try:
+        curses.wrapper(run)
+    finally:  # Windows has no `exec`: close the panel pane ourselves, however the tree ends
+        if WINDOWS and origin and os.environ.get("HERDR_PANE_ID"):
+            subprocess.run([HERDR_BIN, "pane", "close", os.environ["HERDR_PANE_ID"]], capture_output=True)
 
 # ---- commands --------------------------------------------------------------------
 
@@ -843,7 +849,7 @@ def main(argv):
             sys.exit("lagom: nothing to remove, Herdr has no config.toml")
         herdr_hooks(False)
         claude_hooks(False)
-        herdr_write(unpark_theme(strip_block(HERDR.read_text())).rstrip("\n") + "\n")
+        herdr_write(unpark_theme(strip_block(HERDR.read_text(encoding="utf-8"))).rstrip("\n") + "\n")
         wez_install(term_home(s), False)
         (term_home(s) / ".config/wezterm/lagom-state.json").unlink(missing_ok=True)
         wt = wt_settings(wt_home(s)) if wt_home(s) else None
